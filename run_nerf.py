@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from run_nerf_helpers import *
 
 from load_llff import load_llff_data, load_colmap_depth
+#from load_llff import load_llff_mask_data
 from load_dtu import load_dtu_data
 
 from loss import SigmaLoss
@@ -31,7 +32,7 @@ import cv2
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# torch.cuda.set_device(2)
+torch.cuda.set_device(3)
 np.random.seed(0)
 DEBUG = False
 
@@ -69,6 +70,20 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
         ret = render_rays(rays_flat[i:i+chunk], **kwargs)
+        for k in ret:
+            if k not in all_ret:
+                all_ret[k] = []
+            all_ret[k].append(ret[k])
+
+    all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret}
+    return all_ret
+
+def batchify_seg_rays(rays_flat, chunk=1024*32, **kwargs):
+    """Render rays in smaller minibatches to avoid OOM.
+    """
+    all_ret = {}
+    for i in range(0, rays_flat.shape[0], chunk):
+        ret = render_seg_rays(rays_flat[i:i+chunk], **kwargs)
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -148,6 +163,79 @@ def render(H, W, focal, chunk=1024*32, rays=None, c2w=None, ndc=True,
     return ret_list + [ret_dict]
 
 
+def render_seg(H, W, focal, chunk=1024*32, rays=None, c2w=None, ndc=True,
+                  near=0., far=1.,
+                  use_viewdirs=False, c2w_staticcam=None, depths=None,
+                  **kwargs):
+    """Render rays
+    Args:
+      H: int. Height of image in pixels.
+      W: int. Width of image in pixels.
+      focal: float. Focal length of pinhole camera.
+      chunk: int. Maximum number of rays to process simultaneously. Used to
+        control maximum memory usage. Does not affect final results.
+      rays: array of shape [2, batch_size, 3]. Ray origin and direction for
+        each example in batch.
+      c2w: array of shape [3, 4]. Camera-to-world transformation matrix.
+      ndc: bool. If True, represent ray origin, direction in NDC coordinates.
+      near: float or array of shape [batch_size]. Nearest distance for a ray.
+      far: float or array of shape [batch_size]. Farthest distance for a ray.
+      use_viewdirs: bool. If True, use viewing direction of a point in space in model.
+      c2w_staticcam: array of shape [3, 4]. If not None, use this transformation matrix for 
+       camera while using other c2w argument for viewing directions.
+    Returns:
+      rgb_map: [batch_size, 3]. Predicted RGB values for rays.
+      disp_map: [batch_size]. Disparity map. Inverse of depth.
+      acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
+      seg_map: [batch_size]. predicted mask.
+      extras: dict with everything returned by render_rays().
+      
+    """
+    if c2w is not None:
+        # special case to render full image
+        rays_o, rays_d = get_rays(H, W, focal, c2w)
+    else:
+        # use provided ray batch
+        rays_o, rays_d = rays
+
+    if use_viewdirs:
+        # provide ray directions as input
+        viewdirs = rays_d
+        if c2w_staticcam is not None:
+            # special case to visualize effect of viewdirs
+            rays_o, rays_d = get_rays(H, W, focal, c2w_staticcam)
+        viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
+        viewdirs = torch.reshape(viewdirs, [-1,3]).float()
+
+    sh = rays_d.shape # [..., 3]
+    if ndc:
+        # for forward facing scenes
+        rays_o, rays_d = ndc_rays(H, W, focal, 1., rays_o, rays_d)
+
+    # Create ray batch
+    rays_o = torch.reshape(rays_o, [-1,3]).float()
+    rays_d = torch.reshape(rays_d, [-1,3]).float()
+
+    near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
+    rays = torch.cat([rays_o, rays_d, near, far], -1) # B x 8
+    if depths is not None:
+        rays = torch.cat([rays, depths.reshape(-1,1)], -1)
+    if use_viewdirs:
+        rays = torch.cat([rays, viewdirs], -1)
+
+    # Render and reshape
+    all_ret = batchify_seg_rays(rays, chunk, **kwargs)
+    for k in all_ret:
+        k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
+        all_ret[k] = torch.reshape(all_ret[k], k_sh)
+
+    k_extract = ['rgb_map', 'disp_map', 'acc_map', 'depth_map', 'seg_map']
+    ret_list = [all_ret[k] for k in k_extract]
+    ret_dict = {k : all_ret[k] for k in all_ret if k not in k_extract}
+    return ret_list + [ret_dict]
+
+
+
 def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
 
     H, W, focal = hwf
@@ -196,6 +284,59 @@ def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=N
     disps = np.stack(disps, 0)
 
     return rgbs, disps
+
+def render_seg_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+
+    rgbs = []
+    disps = []
+    masks = []
+
+    t = time.time()
+    for i, c2w in enumerate(tqdm(render_poses)):
+        print(i, time.time() - t)
+        t = time.time()
+        rgb, disp, acc, depth, mask, extras = render_seg(H, W, focal, chunk=chunk, c2w=c2w[:3,:4], retraw=True, **render_kwargs)
+        rgbs.append(rgb.cpu().numpy())
+        disps.append(disp.cpu().numpy())
+        masks.append(mask.cpu().numpy())
+        if i==0:
+            print(rgb.shape, disp.shape, mask.shape)
+
+        """
+        if gt_imgs is not None and render_factor==0:
+            p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
+            print(p)
+        """
+
+        if savedir is not None:
+            rgb8 = to8b(rgbs[-1])
+            rgb8[np.isnan(rgb8)] = 0
+            filename = os.path.join(savedir, '{:03d}.png'.format(i))
+            imageio.imwrite(filename, rgb8)
+            depth = depth.cpu().numpy()
+            print("max:", np.nanmax(depth))
+            # depth = depth / 5 * 255
+            # depth_color = cv2.applyColorMap(depth.astype(np.uint8), cv2.COLORMAP_JET)[:,:,::-1]
+            # depth_color[np.isnan(depth_color)] = 0
+            # imageio.imwrite(os.path.join(savedir, '{:03d}_depth.png'.format(i)), depth_color)
+            imageio.imwrite(os.path.join(savedir, '{:03d}_depth.png'.format(i)), depth)
+            np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), acc=acc.cpu().numpy(), depth=depth, mask=mask)
+
+
+    rgbs = np.stack(rgbs, 0)
+    disps = np.stack(disps, 0)
+    masks = np.stack(masks,0)
+
+    return rgbs, disps, masks
+
 
 def render_test_ray(rays_o, rays_d, hwf, ndc, near, far, use_viewdirs, N_samples, network, network_query_fn, **kwargs):
     H, W, focal = hwf
@@ -262,6 +403,119 @@ def create_nerf(args):
     if args.N_importance > 0:
         if args.alpha_model_path is None:
             model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
+                            input_ch=input_ch, output_ch=output_ch, skips=skips,
+                            input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+        else:
+            model_fine = NeRF_RGB(D=args.netdepth_fine, W=args.netwidth_fine,
+                            input_ch=input_ch, output_ch=output_ch, skips=skips,
+                            input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs, alpha_model=alpha_model).to(device)
+        grad_vars += list(model_fine.parameters())
+
+    network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
+                                                                embed_fn=embed_fn,
+                                                                embeddirs_fn=embeddirs_fn,
+                                                                netchunk=args.netchunk)
+
+    # Create optimizer
+    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
+
+    start = 0
+    basedir = args.basedir
+    expname = args.expname
+
+    ##########################
+
+    # Load checkpoints
+    if args.ft_path is not None and args.ft_path!='None':
+        ckpts = [args.ft_path]
+    else:
+        ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if 'tar' in f]
+
+    print('Found ckpts', ckpts)
+    if len(ckpts) > 0 and not args.no_reload:
+        ckpt_path = ckpts[-1]
+        print('Reloading from', ckpt_path)
+        ckpt = torch.load(ckpt_path)
+
+        start = ckpt['global_step']
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+
+        # Load model
+        model.load_state_dict(ckpt['network_fn_state_dict'])
+        if model_fine is not None:
+            model_fine.load_state_dict(ckpt['network_fine_state_dict'])
+
+    ##########################
+
+    render_kwargs_train = {
+        'network_query_fn' : network_query_fn,
+        'perturb' : args.perturb,
+        'N_importance' : args.N_importance,
+        'network_fine' : model_fine,
+        'N_samples' : args.N_samples,
+        'network_fn' : model,
+        'use_viewdirs' : args.use_viewdirs,
+        'white_bkgd' : args.white_bkgd,
+        'raw_noise_std' : args.raw_noise_std,
+    }
+
+    # NDC only good for LLFF-style forward facing data
+    if args.dataset_type != 'llff' or args.no_ndc:
+        print('Not ndc!')
+        render_kwargs_train['ndc'] = False
+        render_kwargs_train['lindisp'] = args.lindisp
+    else:
+        render_kwargs_train['ndc'] = True
+
+    render_kwargs_test = {k : render_kwargs_train[k] for k in render_kwargs_train}
+    render_kwargs_test['perturb'] = False
+    render_kwargs_test['raw_noise_std'] = 0.
+
+    if args.sigma_loss:
+        render_kwargs_train['sigma_loss'] = SigmaLoss(args.N_samples, args.perturb, args.raw_noise_std)
+
+    ##########################
+
+
+    return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
+
+def create_seg_nerf(args):
+    """Instantiate NeRF's MLP model.
+    """
+    embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
+
+    input_ch_views = 0
+    embeddirs_fn = None
+    if args.use_viewdirs:
+        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
+    output_ch = 5
+    skips = [4]
+    if args.alpha_model_path is None:
+        model = NeRF_seg(D=args.netdepth, W=args.netwidth,
+                    input_ch=input_ch, output_ch=output_ch, skips=skips,
+                    input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+        grad_vars = list(model.parameters())
+    else:
+        alpha_model = NeRF_seg(D=args.netdepth_fine, W=args.netwidth_fine,
+                            input_ch=input_ch, output_ch=output_ch, skips=skips,
+                            input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+        print('Alpha model reloading from', args.alpha_model_path)
+        ckpt = torch.load(args.alpha_model_path)
+        alpha_model.load_state_dict(ckpt['network_fine_state_dict'])
+        if not args.no_coarse:
+            model = NeRF_RGB(D=args.netdepth, W=args.netwidth,
+                        input_ch=input_ch, output_ch=output_ch, skips=skips,
+                        input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs, alpha_model=alpha_model).to(device)
+            grad_vars = list(model.parameters())
+        else:
+            model = None
+            grad_vars = []
+    
+
+    model_fine = None
+    if args.N_importance > 0:
+        if args.alpha_model_path is None:
+            model_fine = NeRF_seg(D=args.netdepth_fine, W=args.netwidth_fine,
                             input_ch=input_ch, output_ch=output_ch, skips=skips,
                             input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
         else:
@@ -470,6 +724,141 @@ def render_rays(ray_batch,
     return ret
 
 
+def render_seg_rays(ray_batch,
+                network_fn,
+                network_query_fn,
+                N_samples,
+                retraw=False,
+                lindisp=False,
+                perturb=0.,
+                N_importance=0,
+                network_fine=None,
+                white_bkgd=False,
+                raw_noise_std=0.,
+                verbose=False,
+                pytest=False,
+                sigma_loss=None):
+    """Volumetric rendering.
+    Args:
+      ray_batch: array of shape [batch_size, ...]. All information necessary
+        for sampling along a ray, including: ray origin, ray direction, min
+        dist, max dist, and unit-magnitude viewing direction.
+      network_fn: function. Model for predicting RGB and density at each point
+        in space.
+      network_query_fn: function used for passing queries to network_fn.
+      N_samples: int. Number of different times to sample along each ray.
+      retraw: bool. If True, include model's raw, unprocessed predictions.
+      lindisp: bool. If True, sample linearly in inverse depth rather than in depth.
+      perturb: float, 0 or 1. If non-zero, each ray is sampled at stratified
+        random points in time.
+      N_importance: int. Number of additional times to sample along each ray.
+        These samples are only passed to network_fine.
+      network_fine: "fine" network with same spec as network_fn.
+      white_bkgd: bool. If True, assume a white background.
+      raw_noise_std: ...
+      verbose: bool. If True, print more debugging info.
+    Returns:
+      rgb_map: [num_rays, 3]. Estimated RGB color of a ray. Comes from fine model.
+      seg_map: [num_rays]. Estimated mask of a ray.
+      disp_map: [num_rays]. Disparity map. 1 / depth.
+      acc_map: [num_rays]. Accumulated opacity along each ray. Comes from fine model.
+      raw: [num_rays, num_samples, 4]. Raw predictions from model.
+      rgb0: See rgb_map. Output for coarse model.
+      seg0: See seg_map. Output for coarse model.
+      disp0: See disp_map. Output for coarse model.
+      acc0: See acc_map. Output for coarse model.
+      z_std: [num_rays]. Standard deviation of distances along ray for each
+        sample.
+    """
+    N_rays = ray_batch.shape[0]
+    rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
+    viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 9 else None
+    bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
+    near, far = bounds[...,0], bounds[...,1] # [-1,1]
+
+    t_vals = torch.linspace(0., 1., steps=N_samples).to(device)
+    if not lindisp:
+        z_vals = near * (1.-t_vals) + far * (t_vals)
+    else:
+        z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
+
+    z_vals = z_vals.expand([N_rays, N_samples])
+
+    if perturb > 0.:
+        # get intervals between samples
+        mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+        upper = torch.cat([mids, z_vals[...,-1:]], -1)
+        lower = torch.cat([z_vals[...,:1], mids], -1)
+        # stratified samples in those intervals
+        t_rand = torch.rand(z_vals.shape).to(device)
+
+        # Pytest, overwrite u with numpy's fixed random numbers
+        if pytest:
+            np.random.seed(0)
+            t_rand = np.random.rand(*list(z_vals.shape))
+            t_rand = torch.Tensor(t_rand).to(device)
+
+        z_vals = lower + (upper - lower) * t_rand
+
+    pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
+
+
+#     raw = run_network(pts)
+    if network_fn is not None:
+        raw = network_query_fn(pts, viewdirs, network_fn)
+        rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs_seg(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    else:
+        # rgb_map, disp_map, acc_map = None, None, None
+        # raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+        # noise = 0
+        # alpha = etwork_query_fn(pts, viewdirs, network_fine.alpha_model)[...,3]
+        if network_fine.alpha_model is not None:
+            raw = network_query_fn(pts, viewdirs, network_fine.alpha_model)
+            rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs_seg(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+        else:
+            raw = network_query_fn(pts, viewdirs, network_fine)
+            rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs_seg(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+
+
+    if N_importance > 0:
+
+        rgb_map_0, disp_map_0, acc_map_0, seg_map_0 = rgb_map, disp_map, acc_map, seg_map
+
+        z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+        z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
+        z_samples = z_samples.detach()
+
+        z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
+        pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
+
+        run_fn = network_fn if network_fine is None else network_fine
+#         raw = run_network(pts, fn=run_fn)
+        raw = network_query_fn(pts, viewdirs, run_fn)
+
+        rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs_seg(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+
+    ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map, 'depth_map' : depth_map, 'seg_map' : seg_map}
+    if retraw:
+        ret['raw'] = raw
+    if N_importance > 0:
+        ret['rgb0'] = rgb_map_0
+        ret['disp0'] = disp_map_0
+        ret['acc0'] = acc_map_0
+        ret['seg0'] = seg_map_0
+        ret['z_std'] = torch.std(z_samples, dim=-1, unbiased=False)  # [N_rays]
+
+    if sigma_loss is not None and ray_batch.shape[-1] > 11:
+        depths = ray_batch[:,8]
+        ret['sigma_loss'] = sigma_loss.calculate_loss(rays_o, rays_d, viewdirs, near, far, depths, network_query_fn, network_fine)
+
+    for k in ret:
+        if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
+            print(f"! [Numerical Error] {k} contains nan or inf.")
+
+    return ret
+
+
+
 def config_parser():
 
     import configargparse
@@ -574,6 +963,10 @@ def config_parser():
     parser.add_argument("--llffhold", type=int, default=8, 
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
+    parser.add_argument("--downsample", action='store_true', 
+                        help='downsample LLFF images')
+    
+
     # logging/saving options
     parser.add_argument("--i_print",   type=int, default=100, 
                         help='frequency of console printout and metric loggin')
@@ -618,8 +1011,16 @@ def config_parser():
                     help="single forward for both depth and rgb")
     parser.add_argument("--normalize_depth", action='store_true',
                     help="normalize depth before calculating loss")
-    parser.add_argument("--depth_rays_prop", type=float, default=0.5,
+    parser.add_argument("--depth_rays_prop", type=float, default=0.45,
                         help="Proportion of depth rays.")
+
+    # Segmentation options
+
+    parser.add_argument("--segmentation", action='store_true', help="segmentation is considered during training")
+    parser.add_argument("--seg_rays_prop", type=float, default=0.1, help="Proportion of segmentation rays")
+    parser.add_argument("--seg_lambda", type=float, default=0.1, help="segmentation lambda used for loss")
+    parser.add_argument("--mask_data", action='store_true', help="indicates if the images are in a mask format")
+    
     return parser
 
 
@@ -632,12 +1033,26 @@ def train():
     if args.dataset_type == 'llff':
         if args.colmap_depth:
             depth_gts = load_colmap_depth(args.datadir, factor=args.factor, bd_factor=.75)
-        images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+        if args.downsample :
+            factor = args.factor
+        else:
+            factor = None
+        images, poses, bds, render_poses, i_test = load_llff_data('images', args.datadir, factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
+
+        if args.mask_data:
+            images, poses, bds, render_poses, i_test = load_llff_data('masksasimages', args.datadir, factor,
+                                                                  recenter=True, bd_factor=.75,
+                                                                  spherify=args.spherify)
+        
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
+
+        if args.segmentation:
+            masks, _, _, _, _ = load_llff_data('masks', args.datadir, factor=None, recenter=True, bd_factor=.75, spherify=args.spherify)
+    
         if not isinstance(i_test, list):
             i_test = [i_test]
 
@@ -688,7 +1103,7 @@ def train():
         near = 0.1
         far = 5.0
         if args.colmap_depth:
-            depth_gts = load_colmap_depth(args.datadir, factor=args.factor, bd_factor=.75)
+            depth_gts = load_colmap_depth(args.datadir, factor=factor, bd_factor=.75)
     else:
         print('Unknown dataset type', args.dataset_type, 'exiting')
         return
@@ -721,9 +1136,12 @@ def train():
             file.write(open(args.config, 'r').read())
 
     # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+    if not args.segmentation:
+        render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
 
-
+    else:
+        render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_seg_nerf(args)
+        
     global_step = start
 
     bds_dict = {
@@ -783,11 +1201,19 @@ def train():
             return
 
     # Prepare raybatch tensor if batching random rays
-    if not args.colmap_depth:
+    if not args.colmap_depth and not args.segmentation:
         N_rgb = args.N_rand
-    else:
+    elif args.colmap_depth and not args.segmentation:
         N_depth = int(args.N_rand * args.depth_rays_prop)
         N_rgb = args.N_rand - N_depth
+    elif not args.colmap_depth and args.segmentation:
+        N_seg = int(args.N_rand * args.seg_rays_prop)
+        N_rgb = args.N_rand - N_seg
+    else:
+        assert(args.seg_rays_prop + args.depth_rays_prop < 1)
+        N_seg = int(args.N_rand * args.seg_rays_prop)
+        N_depth = int(args.N_rand * args.depth_rays_prop)
+        N_rgb = args.N_rand - N_seg - N_depth
     use_batching = not args.no_batching
     if use_batching:
         # For random ray batching
@@ -796,6 +1222,10 @@ def train():
         if args.debug:
             print('rays.shape:', rays.shape)
         print('done, concats')
+
+        print('rays.shape:', rays.shape)
+        print('images.shape:', images.shape)
+        
         rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
         if args.debug:
             print('rays_rgb.shape:', rays_rgb.shape)
@@ -830,6 +1260,46 @@ def train():
             np.random.shuffle(rays_depth)
 
             max_depth = np.max(rays_depth[:,3,0])
+        rays_seg = None
+        if args.segmentation:
+            print('get segmentation rays')
+            rays_seg_list = []
+            rays = np.stack([get_rays_np(H, W, focal, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
+            if args.debug:
+                print('rays.shape:', rays.shape)
+            print('done, concats')
+            
+            rays_seg = np.concatenate([rays, masks[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
+            if args.debug:
+                print('rays_seg.shape:', rays_seg.shape)
+            rays_seg = np.transpose(rays_seg, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
+            rays_seg = np.stack([rays_seg[i] for i in i_train], 0) # train images only
+            rays_seg = np.reshape(rays_seg, [-1,3,3]) # ?? [(N-1)*H*W, ro+rd+rgb, 3]
+            rays_seg = rays_seg.astype(np.float32)
+            print('shuffle rays')
+            np.random.shuffle(rays_seg)
+#            for i in i_train:
+#                rays_seg = np.stack(get_rays_np(H, W, focal, poses[i,:3,:4]), axis=0) # 2 x N x 3
+#                # print(rays_seg.shape)
+#                rays_seg = np.transpose(rays_seg, [1,0,2])
+#                seg_value = np.repeat(depth_gts[i]['depth'][:,None,None], 3, axis=2) # N x 1 x 3
+#                weights = np.repeat(depth_gts[i]['weight'][:,None,None], 3, axis=2) # N x 1 x 3
+#                rays_seg = np.concatenate([rays_seg, seg_value, weights], axis=1) # N x 4 x 3
+#                rays_seg_list.append(rays_seg)
+
+#            rays_seg = np.concatenate(rays_seg_list, axis=0)
+#            print('rays_weights mean:', np.mean(rays_depth[:,3,0]))
+#            print('rays_weights std:', np.std(rays_depth[:,3,0]))
+#            print('rays_weights max:', np.max(rays_depth[:,3,0]))
+#            print('rays_weights min:', np.min(rays_depth[:,3,0]))
+#            print('rays_seg.shape:', rays_seg.shape)
+#            rays_seg = rays_seg.astype(np.float32)
+#            print('shuffle segmemtation rays')
+#            np.random.shuffle(rays_seg)
+
+#            max_seg = np.max(rays_seg[:,3,0])
+            
+
         print('done')
         i_batch = 0
 
@@ -837,13 +1307,16 @@ def train():
         return
     # Move training data to GPU
     images = torch.Tensor(images).to(device)
+    if args.segmentation:
+        masks = torch.Tensor(masks).to(device)
     poses = torch.Tensor(poses).to(device)
     if use_batching:
         # rays_rgb = torch.Tensor(rays_rgb).to(device)
         # rays_depth = torch.Tensor(rays_depth).to(device) if rays_depth is not None else None
-        raysRGB_iter = iter(DataLoader(RayDataset(rays_rgb), batch_size = N_rgb, shuffle=True, num_workers=0))
-        raysDepth_iter = iter(DataLoader(RayDataset(rays_depth), batch_size = N_depth, shuffle=True, num_workers=0)) if rays_depth is not None else None
-
+        raysRGB_iter = iter(DataLoader(RayDataset(rays_rgb), batch_size = N_rgb, shuffle=False, num_workers=0))
+        raysDepth_iter = iter(DataLoader(RayDataset(rays_depth), batch_size = N_depth, shuffle=False, num_workers=0)) if rays_depth is not None else None
+        raysSeg_iter = iter(DataLoader(RayDataset(rays_seg), batch_size = N_seg, shuffle=False, num_workers=0)) if rays_seg is not None else None
+        
 
     N_iters = args.N_iters + 1
     print('Begin')
@@ -865,7 +1338,7 @@ def train():
             try:
                 batch = next(raysRGB_iter).to(device)
             except StopIteration:
-                raysRGB_iter = iter(DataLoader(RayDataset(rays_rgb), batch_size = N_rgb, shuffle=True, num_workers=0))
+                raysRGB_iter = iter(DataLoader(RayDataset(rays_rgb), batch_size = N_rgb, shuffle=False, num_workers=0))
                 batch = next(raysRGB_iter).to(device)
             batch = torch.transpose(batch, 0, 1)
             batch_rays, target_s = batch[:2], batch[2]
@@ -875,13 +1348,25 @@ def train():
                 try:
                     batch_depth = next(raysDepth_iter).to(device)
                 except StopIteration:
-                    raysDepth_iter = iter(DataLoader(RayDataset(rays_depth), batch_size = N_depth, shuffle=True, num_workers=0))
+                    raysDepth_iter = iter(DataLoader(RayDataset(rays_depth), batch_size = N_depth, shuffle=False, num_workers=0))
                     batch_depth = next(raysDepth_iter).to(device)
                 batch_depth = torch.transpose(batch_depth, 0, 1)
                 batch_rays_depth = batch_depth[:2] # 2 x B x 3
                 target_depth = batch_depth[2,:,0] # B
                 ray_weights = batch_depth[3,:,0]
 
+            if args.segmentation:
+                # batch_seg = rays_seg[i_batch:i_batch+N_rand]
+                try:
+                    batch_seg = next(raysSeg_iter).to(device)
+                except StopIteration:
+                    raysSeg_iter = iter(DataLoader(RayDataset(rays_seg), batch_size = N_seg, shuffle=False, num_workers=0))
+                    batch_seg = next(raysSeg_iter).to(device)
+                batch_seg = torch.transpose(batch_seg, 0, 1)
+                batch_rays_seg = batch_seg[:2]
+                target_seg = batch_seg[2]
+
+                
             # i_batch += N_rand
             # if i_batch >= rays_rgb.shape[0] or (args.colmap_depth and i_batch >= rays_depth.shape[0]):
             #     print("Shuffle data after an epoch!")
@@ -930,24 +1415,45 @@ def train():
             N_batch = batch_rays.shape[1]
             batch_rays = torch.cat([batch_rays, batch_rays_depth], 1) # (2, 2 * N_rand, 3)
 
+        if args.segmentation:
+            N_batch_seg = batch_rays_seg.shape[1]
+            batch_rays = torch.cat([batch_rays, batch_rays_seg], 1)
+            
         # timer_concate = time.perf_counter()
 
 
-        rgb, disp, acc, depth, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays,
+        if not args.segmentation:
+            rgb, disp, acc, depth, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
+    
+        else:
+            rgb, disp, acc, depth, mask, extras = render_seg(H, W, focal, chunk=args.chunk, rays=batch_rays,
+                                                verbose=i < 10, retraw=True,
+                                                **render_kwargs_train)
+
+        
         # timer_iter = time.perf_counter()
 
         if args.colmap_depth and not args.depth_with_rgb:
-            # _, _, _, depth_col, extras_col = render(H, W, focal, chunk=args.chunk, rays=batch_rays_depth,
-            #                                     verbose=i < 10, retraw=True, depths=target_depth,
-            #                                     **render_kwargs_train)
-            rgb = rgb[:N_batch, :]
-            disp = disp[:N_batch]
-            acc = acc[:N_batch]
-            depth, depth_col = depth[:N_batch], depth[N_batch:]
-            extras = {x:extras[x][:N_batch] for x in extras}
-            # extras_col = extras[N_rand:, :]
+            if not args.segmentation:
+                # _, _, _, depth_col, extras_col = render(H, W, focal, chunk=args.chunk, rays=batch_rays_depth,
+                #                                     verbose=i < 10, retraw=True, depths=target_depth,
+                #                                     **render_kwargs_train)
+                rgb = rgb[:N_batch, :]
+                disp = disp[:N_batch]
+                acc = acc[:N_batch]
+                depth, depth_col = depth[:N_batch], depth[N_batch:]
+                extras = {x:extras[x][:N_batch] for x in extras}
+                # extras_col = extras[N_rand:, :]
+            else:
+                rgb = rgb[:N_batch, :]
+                disp = disp[:N_batch]
+                acc = acc[:N_batch]
+                depth, depth_col = depth[:N_batch], depth[N_batch:-N_batch_seg]
+                mask = mask[-N_batch_seg:, :]
+                extras = {x:extras[x][:N_batch] for x in extras}
+                # extras_col = extras[N_rand:, :]
 
         elif args.colmap_depth and args.depth_with_rgb:
             depth_col = depth
@@ -968,12 +1474,16 @@ def train():
                 depth_loss = torch.mean(((depth_col - target_depth) / target_depth)**2)
             else:
                 depth_loss = img2mse(depth_col, target_depth)
+
+        seg_loss=0
+        if args.segmentation:
+            seg_loss = img2mse(mask, target_seg)
         sigma_loss = 0
         if args.sigma_loss:
             sigma_loss = extras_col['sigma_loss'].mean()
             # print(sigma_loss)
         trans = extras['raw'][...,-1]
-        loss = img_loss + args.depth_lambda * depth_loss + args.sigma_lambda * sigma_loss
+        loss = img_loss + args.depth_lambda * depth_loss + args.seg_lambda * seg_loss + args.sigma_lambda * sigma_loss
         psnr = mse2psnr(img_loss)
 
         # timer_loss = time.perf_counter()
@@ -1033,12 +1543,17 @@ def train():
         if args.i_video > 0 and i%args.i_video==0 and i > 0:
             # Turn on testing mode
             with torch.no_grad():
-                rgbs, disps = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-            print('Done, saving', rgbs.shape, disps.shape)
+                if not args.segmentation:
+                    rgbs, disps = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
+                    print('Done, saving', rgbs.shape, disps.shape)
+                else:
+                    rgbs, disps, masks = render_seg_path(render_poses, hwf, args.chunk, render_kwargs_test)
+                    print('Done, saving', rgbs.shape, disps.shape, masks.shape)
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.nanmax(disps)), fps=30, quality=8)
-
+            if args.segmentation:
+                imageio.mimwrite(moviebase + 'mask.mp4', to8b(masks), fps=30, quality=8)
 
             # if args.use_viewdirs:
             #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
@@ -1052,7 +1567,10 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
-                rgbs, disps = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+                if not args.segmentation:
+                    rgbs, disps = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+                else:
+                    rgbs,  disps, masks = render_seg_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
             print('Saved test set')
 
             filenames = [os.path.join(testsavedir, '{:03d}.png'.format(k)) for k in range(len(i_test))]

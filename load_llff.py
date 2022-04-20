@@ -32,6 +32,7 @@ def _minify(basedir, factors=[], resolutions=[]):
     
     wd = os.getcwd()
 
+
     for r in factors + resolutions:
         if isinstance(r, int):
             name = 'images_{}'.format(r)
@@ -59,9 +60,7 @@ def _minify(basedir, factors=[], resolutions=[]):
             check_output('rm {}/*.{}'.format(imgdir, ext), shell=True)
             print('Removed duplicates')
         print('Done')
-            
-        
-        
+                
         
 def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     
@@ -121,10 +120,7 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     print('Loaded image data', imgs.shape, poses[:,-1,0])
     return poses, bds, imgs
 
-    
-            
-            
-    
+
 
 def normalize(x):
     return x / np.linalg.norm(x)
@@ -242,12 +238,64 @@ def spherify_poses(poses, bds):
     poses_reset = np.concatenate([poses_reset[:,:3,:4], np.broadcast_to(poses[0,:3,-1:], poses_reset[:,:3,-1:].shape)], -1)
     
     return poses_reset, new_poses, bds
-    
 
-def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
-    
 
-    poses, bds, imgs = _load_data(basedir, factor=factor) # factor=8 downsamples original imgs by 8x
+def _load_mask(basedir, directory, width=None, height=None, load_imgs=True):
+    
+    poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
+    poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0]) # 3 x 5 x N
+    bds = poses_arr[:, -2:].transpose([1,0])
+    
+    img0 = [os.path.join(basedir, directory, f) for f in sorted(os.listdir(os.path.join(basedir, directory))) \
+            if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
+    sh = imageio.imread(img0).shape
+    
+        
+    imgdir = os.path.join(basedir, directory)
+    if not os.path.exists(imgdir):
+        print( imgdir, 'does not exist, returning' )
+        return
+    
+    imgfiles = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir)) if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
+    if poses.shape[-1] != len(imgfiles):
+        print( 'Mismatch between imgs {} and poses {} !!!!'.format(len(imgfiles), poses.shape[-1]) )
+        return
+
+    sh = imageio.imread(imgfiles[0]).shape
+    poses[:2, 4, :] = np.array(sh[:2]).reshape([2, 1])
+    
+    if not load_imgs:
+        return poses, bds
+    
+    def imread(f):
+        if f.endswith('png'):
+            return imageio.imread(f, ignoregamma=True, pilmode="RGB")
+        else:
+            return imageio.imread(f, pilmode="RGB")
+        
+    
+    imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
+
+    
+    imgs = np.stack(imgs, -1)  
+    
+    print('Loaded image data', imgs.shape, poses[:,-1,0])
+    return poses, bds, imgs
+
+
+
+
+
+def load_llff_data(imgs_type, basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
+    
+    if imgs_type == 'images':
+        poses, bds, imgs = _load_data(basedir, factor=factor) # factor=8 downsamples original imgs by 8x
+    elif imgs_type == 'masks':
+        poses, bds, imgs = _load_mask(basedir, directory='masks')
+
+    elif imgs_type == 'masksasimages':
+        poses, bds, imgs = _load_mask(basedir, directory='images')
+        
     print('Loaded', basedir, bds.min(), bds.max())
     
     # print('poses_bound.npy:\n', poses[:,:,0])
