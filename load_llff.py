@@ -9,14 +9,14 @@ import json
 ########## Slightly modified version of LLFF data loading code 
 ##########  see https://github.com/Fyusion/LLFF for original
 
-def _minify(basedir, factors=[], resolutions=[]):
+def _minify(basedir, imgs_type='images', factors=[], resolutions=[]):
     needtoload = False
     for r in factors:
-        imgdir = os.path.join(basedir, 'images_{}'.format(r))
+        imgdir = os.path.join(basedir, imgs_type+'_{}'.format(r))
         if not os.path.exists(imgdir):
             needtoload = True
     for r in resolutions:
-        imgdir = os.path.join(basedir, 'images_{}x{}'.format(r[1], r[0]))
+        imgdir = os.path.join(basedir, imgs_type+'_{}x{}'.format(r[1], r[0]))
         if not os.path.exists(imgdir):
             needtoload = True
     if not needtoload:
@@ -25,7 +25,7 @@ def _minify(basedir, factors=[], resolutions=[]):
     from shutil import copy
     from subprocess import check_output
     
-    imgdir = os.path.join(basedir, 'images')
+    imgdir = os.path.join(basedir, imgs_type)
     imgs = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir))]
     imgs = [f for f in imgs if any([f.endswith(ex) for ex in ['JPG', 'jpg', 'png', 'jpeg', 'PNG']])]
     imgdir_orig = imgdir
@@ -35,10 +35,10 @@ def _minify(basedir, factors=[], resolutions=[]):
 
     for r in factors + resolutions:
         if isinstance(r, int):
-            name = 'images_{}'.format(r)
+            name = imgs_type+'_{}'.format(r)
             resizearg = '{}%'.format(100./r)
         else:
-            name = 'images_{}x{}'.format(r[1], r[0])
+            name = imgs_type+'_{}x{}'.format(r[1], r[0])
             resizearg = '{}x{}'.format(r[1], r[0])
         imgdir = os.path.join(basedir, name)
         if os.path.exists(imgdir):
@@ -62,36 +62,39 @@ def _minify(basedir, factors=[], resolutions=[]):
         print('Done')
                 
         
-def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
+def _load_data(basedir, directory='images', downsample=True, factor=None, width=None, height=None, load_imgs=True, masksasimage=False):
     
     poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
     poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0]) # 3 x 5 x N
     bds = poses_arr[:, -2:].transpose([1,0])
     
-    img0 = [os.path.join(basedir, 'images', f) for f in sorted(os.listdir(os.path.join(basedir, 'images'))) \
+    img0 = [os.path.join(basedir, directory, f) for f in sorted(os.listdir(os.path.join(basedir, directory))) \
             if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
     sh = imageio.imread(img0).shape
     
     sfx = ''
+
+    if downsample:
+        if factor is not None:
+            sfx = '_{}'.format(factor)
+            _minify(basedir, imgs_type=directory, factors=[factor])
+            factor = factor
+        elif height is not None:
+            factor = sh[0] / float(height)
+            width = int(sh[1] / factor)
+            _minify(basedir, imgs_type=directory, resolutions=[[height, width]])
+            sfx = '_{}x{}'.format(width, height)
+        elif width is not None:
+            factor = sh[1] / float(width)
+            height = int(sh[0] / factor)
+            _minify(basedir, imgs_type=directory, resolutions=[[height, width]])
+            sfx = '_{}x{}'.format(width, height)
+        else:
+            factor = 1
+
     
-    if factor is not None:
-        sfx = '_{}'.format(factor)
-        _minify(basedir, factors=[factor])
-        factor = factor
-    elif height is not None:
-        factor = sh[0] / float(height)
-        width = int(sh[1] / factor)
-        _minify(basedir, resolutions=[[height, width]])
-        sfx = '_{}x{}'.format(width, height)
-    elif width is not None:
-        factor = sh[1] / float(width)
-        height = int(sh[0] / factor)
-        _minify(basedir, resolutions=[[height, width]])
-        sfx = '_{}x{}'.format(width, height)
-    else:
-        factor = 1
-    
-    imgdir = os.path.join(basedir, 'images' + sfx)
+    imgdir = os.path.join(basedir, directory + sfx)
+        
     if not os.path.exists(imgdir):
         print( imgdir, 'does not exist, returning' )
         return
@@ -110,9 +113,15 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     
     def imread(f):
         if f.endswith('png'):
-            return imageio.imread(f, ignoregamma=True)
+            if directory=='masks' or masksasimage:
+                return imageio.imread(f, ignoregamma=True, pilmode="RGB")
+            else:
+                return imageio.imread(f, ignoregamma=True)
         else:
-            return imageio.imread(f)
+            if directory=='masks' or masksasimage:
+                return imageio.imread(f, pilmode="RGB")
+            else:
+                return imageio.imread(f)
         
     imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
     imgs = np.stack(imgs, -1)  
@@ -240,61 +249,16 @@ def spherify_poses(poses, bds):
     return poses_reset, new_poses, bds
 
 
-def _load_mask(basedir, directory, width=None, height=None, load_imgs=True):
-    
-    poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
-    poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0]) # 3 x 5 x N
-    bds = poses_arr[:, -2:].transpose([1,0])
-    
-    img0 = [os.path.join(basedir, directory, f) for f in sorted(os.listdir(os.path.join(basedir, directory))) \
-            if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
-    sh = imageio.imread(img0).shape
-    
-        
-    imgdir = os.path.join(basedir, directory)
-    if not os.path.exists(imgdir):
-        print( imgdir, 'does not exist, returning' )
-        return
-    
-    imgfiles = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir)) if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
-    if poses.shape[-1] != len(imgfiles):
-        print( 'Mismatch between imgs {} and poses {} !!!!'.format(len(imgfiles), poses.shape[-1]) )
-        return
 
-    sh = imageio.imread(imgfiles[0]).shape
-    poses[:2, 4, :] = np.array(sh[:2]).reshape([2, 1])
-    
-    if not load_imgs:
-        return poses, bds
-    
-    def imread(f):
-        if f.endswith('png'):
-            return imageio.imread(f, ignoregamma=True, pilmode="RGB")
-        else:
-            return imageio.imread(f, pilmode="RGB")
-        
-    
-    imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
-
-    
-    imgs = np.stack(imgs, -1)  
-    
-    print('Loaded image data', imgs.shape, poses[:,-1,0])
-    return poses, bds, imgs
-
-
-
-
-
-def load_llff_data(imgs_type, basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
+def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
     
     if imgs_type == 'images':
-        poses, bds, imgs = _load_data(basedir, factor=factor) # factor=8 downsamples original imgs by 8x
+        poses, bds, imgs = _load_data(basedir, downsample=downsample, factor=factor) # factor=8 downsamples original imgs by 8x
     elif imgs_type == 'masks':
-        poses, bds, imgs = _load_mask(basedir, directory='masks')
+        poses, bds, imgs = _load_data(basedir, directory='masks', downsample=downsample, factor=factor)
 
     elif imgs_type == 'masksasimages':
-        poses, bds, imgs = _load_mask(basedir, directory='images')
+        poses, bds, imgs = _load_data(basedir, directory='images', factor=factor, masksasimage=True)
         
     print('Loaded', basedir, bds.min(), bds.max())
     
