@@ -101,10 +101,12 @@ def render(H, W, focal, chunk=1024*32, rays=None, c2w=None, ndc=True,
       use_viewdirs: bool. If True, use viewing direction of a point in space in model.
       c2w_staticcam: array of shape [3, 4]. If not None, use this transformation matrix for 
        camera while using other c2w argument for viewing directions.
+      segmentation: bool. If True, outputs labelised rays.
     Returns:
       rgb_map: [batch_size, 3]. Predicted RGB values for rays.
       disp_map: [batch_size]. Disparity map. Inverse of depth.
       acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
+      seg_map: [batch_size, 3]. Predicted label for rays.
       extras: dict with everything returned by render_rays().
     """
     if c2w is not None:
@@ -165,12 +167,13 @@ def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=N
         focal = focal/render_factor
 
     rgbs = []
-    disps = []
-    if segmentation:
-        masks = []
+    disps = []    
+    masks = []
         
     t = time.time()
-    for i, c2w in enumerate(tqdm(render_poses)):
+    if len(render_poses)>10:
+        print(f"...loading {len(render_poses)} frames")
+    for i, c2w in enumerate(render_poses):
         print(i, time.time() - t)
         t = time.time()
         if segmentation:
@@ -180,14 +183,14 @@ def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=N
             rgb, disp, acc, depth, extras = render(H, W, focal, chunk=chunk, c2w=c2w[:3,:4], retraw=True, **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
-        if i==0:
-            print(rgb.shape, disp.shape)
+        #if i==0:
+        #    print(rgb.shape, disp.shape)
 
-        """
-        if gt_imgs is not None and render_factor==0:
-            p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
-            print(p)
-        """
+       # """
+       # if gt_imgs is not None and render_factor==0:
+       #     p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
+       #     print(p)
+       # """
 
         if savedir is not None:
             rgb8 = to8b(rgbs[-1])
@@ -195,22 +198,26 @@ def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=N
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
             depth = depth.cpu().numpy()
-            print("max:", np.nanmax(depth))
+            #print("max:", np.nanmax(depth))
             # depth = depth / 5 * 255
             # depth_color = cv2.applyColorMap(depth.astype(np.uint8), cv2.COLORMAP_JET)[:,:,::-1]
             # depth_color[np.isnan(depth_color)] = 0
             # imageio.imwrite(os.path.join(savedir, '{:03d}_depth.png'.format(i)), depth_color)
             imageio.imwrite(os.path.join(savedir, '{:03d}_depth.png'.format(i)), depth)
-            np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), acc=acc.cpu().numpy(), depth=depth)
+            if segmentation:
+                mask8 = to8b(masks[-1])
+                mask8[np.isnan(mask8)] = 0
+                imageio.imwrite(os.path.join(savedir, '{:03d}_mask.png'.format(i)), mask8)
+                np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), mask=mask.cpu().numpy(), acc=acc.cpu().numpy(), depth=depth)
+            else:
+                np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), acc=acc.cpu().numpy(), depth=depth)
 
 
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
-    if segmentation:
-        masks = np.stack(masks, 0)
-        return rgbs, disps, masks
-        
-    return rgbs, disps
+    masks = np.stack(masks,0)
+
+    return rgbs, disps, masks
 
 
 def render_test_ray(rays_o, rays_d, hwf, ndc, near, far, use_viewdirs, N_samples, network, network_query_fn, **kwargs):
@@ -668,8 +675,8 @@ def config_parser():
 
 class Plot:
     
-    def __init__(self, title, xlabel, ylabel, legends):
-        self.vis = visdom.Visdom(port=8099)
+    def __init__(self, title, xlabel='xlabel', ylabel='ylabel', legends=['legend']):
+        self.vis = visdom.Visdom(server='10.10.77.108', port=8099, env='DSNeRF')
         self.win = None
         self.opts = dict(
             title = title,
@@ -691,8 +698,11 @@ class Plot:
             self.win = self.vis.line(X=[x], Y=[y], name=legend, opts=self.opts)
         else:
             self.vis.line(X=[x], Y=[y], win=self.win, name=legend, update='append', opts=self.opts)
-
-        
+    def image(self, img):
+        if self.win == None:
+            self.win = self.vis.image(img)
+        else:
+            self.vis.images(img)
 
 def train():
 
@@ -712,8 +722,8 @@ def train():
         
         images, poses, bds, render_poses, i_test = load_llff_data('images', args.datadir, args.downsample, factor,
                                                                   recenter=True, bd_factor=.75,
-                                                                  spherify=args.spherify)
-
+                                                                  spherify=args.spherify, path_zflat=True)
+        
         if args.mask_data:
             images, poses, bds, render_poses, i_test = load_llff_data('masksasimages', args.datadir, factor,
                                                                   recenter=True, bd_factor=.75,
@@ -724,7 +734,7 @@ def train():
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
 
         if args.segmentation:
-            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify)
+            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True)
 
             hwf_masks = poses_masks[0,:3,-1]
             H_m, W_m, focal_m = hwf_masks
@@ -900,8 +910,6 @@ def train():
             print('rays.shape:', rays.shape)
         print('done, concats')
 
-        print('rays.shape:', rays.shape)
-        print('images.shape:', images.shape)
         
         rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
         if args.debug:
@@ -927,11 +935,11 @@ def train():
                 rays_depth_list.append(rays_depth)
 
             rays_depth = np.concatenate(rays_depth_list, axis=0)
-            print('rays_weights mean:', np.mean(rays_depth[:,3,0]))
-            print('rays_weights std:', np.std(rays_depth[:,3,0]))
-            print('rays_weights max:', np.max(rays_depth[:,3,0]))
-            print('rays_weights min:', np.min(rays_depth[:,3,0]))
-            print('rays_depth.shape:', rays_depth.shape)
+            #print('rays_weights mean:', np.mean(rays_depth[:,3,0]))
+            #print('rays_weights std:', np.std(rays_depth[:,3,0]))
+            #print('rays_weights max:', np.max(rays_depth[:,3,0]))
+            #print('rays_weights min:', np.min(rays_depth[:,3,0]))
+            #print('rays_depth.shape:', rays_depth.shape)
             rays_depth = rays_depth.astype(np.float32)
             print('shuffle depth rays')
             np.random.shuffle(rays_depth)
@@ -939,7 +947,7 @@ def train():
             max_depth = np.max(rays_depth[:,3,0])
         rays_seg = None
         if args.segmentation:
-            print('get segmentation rays')
+            print('get label generation rays')
             rays_seg_list = []
             rays = np.stack([get_rays_np(H_m, W_m, focal_m, p) for p in poses_masks[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
             if args.debug:
@@ -1006,10 +1014,12 @@ def train():
     
     start = start + 1
 
-    plot_loss = Plot('Loss', 'Step', 'Loss', ['train_loss', 'test_loss'])
-    plot_psnr = Plot('PSNR', 'Step', 'PSNR', ['psnr'])
-    plot_vid = visdom.Visdom(port=8099)
-    
+    plot_loss = Plot('Loss', 'Step', 'Loss', ['train loss', 'test loss'])
+    plot_psnr = Plot('PSNR', 'Step', 'PSNR', ['train psnr', 'test psnr'])
+    if args.segmentation:
+        plot_mask = Plot('mask')
+    plot_disp = Plot('disp')
+    plot_rgb = Plot('rgb')
     
     for i in trange(start, N_iters):
         time0 = time.time()
@@ -1141,6 +1151,15 @@ def train():
         elif args.colmap_depth and args.depth_with_rgb:
             depth_col = depth
 
+        elif not args.colmap_depth and args.segmentation:
+            rgb = rgb[:-N_batch_seg, :]
+            disp = disp[:-N_batch_seg]
+            acc = acc[:-N_batch_seg]
+            mask = mask[-N_batch_seg:, :]
+            extras = {x:extras[x][:-N_batch_seg] for x in extras}
+            # extras_col = extras[N_rand:, :]
+
+            
         # timer_split = time.perf_counter()
 
         optimizer.zero_grad()
@@ -1226,16 +1245,20 @@ def train():
         if args.i_video > 0 and i%args.i_video==0 and i > 0 or i==1000:
             # Turn on testing mode
             with torch.no_grad():
-                rgbs, disps = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-                print('Done, saving', rgbs.shape, disps.shape)
-                if args.segmentation:
-                    _, _, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation)
-                    print('Done, saving', masks.shape)
+                rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation)
+                print('Done, saving', rgbs.shape, disps.shape, masks.shape)
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-            imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.nanmax(disps)), fps=30, quality=8)
-            if args.segmentation:
+            if not args.segmentation:
+                imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
+                imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.nanmax(disps)), fps=30, quality=8)
+                #plot_imgs.image(to8b(disps)[5,10],to8b(rgbs)[5,10])
+            else:
+                imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
+                imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.nanmax(disps)), fps=30, quality=8)
                 imageio.mimwrite(moviebase + 'mask.mp4', to8b(masks), fps=30, quality=8)
+                #plot_imgs.image(to8b(disps)[5,10], to8b(masks)[5,10], to8b(rgbs)[5,10])                    
+            
+            #time.sleep(0.05)
 
             # if args.use_viewdirs:
             #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
@@ -1244,14 +1267,12 @@ def train():
             #     render_kwargs_test['c2w_staticcam'] = None
             #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
 
-        if i%args.i_testset==0 and i > 0 and len(i_test) > 0:
+        if i%args.i_testset==0 and i > 0 and len(i_test) > 0 or i==1000:
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
-                rgbs, disps = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
-                if args.segmentation:
-                    _,  _, masks = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir, segmentation=args.segmentation)
+                rgbs, disps, masks = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir, segmentation=args.segmentation)
             print('Saved test set')
 
             filenames = [os.path.join(testsavedir, '{:03d}.png'.format(k)) for k in range(len(i_test))]
@@ -1259,24 +1280,32 @@ def train():
             test_loss = img2mse(torch.Tensor(rgbs), images[i_test])
             test_psnr = mse2psnr(test_loss)
 
-        if i%args.i_visdom==0 and i > 0 and len(i_test) > 0:
+            #if args.segmentation:
+            #    test_lossmsk = img2mse(torch.Tensor(masks), masks[i_test])
+            #    test_psnrmsk = mse2psnr(test_lossmsk)
 
-            test_loss = img2mse(torch.Tensor(rgbs), images[i_test])
-            test_psnr = mse2psnr(test_loss)
+        
+
+        if i%args.i_visdom==0 and i > 0 and len(i_test) > 0:
+            with torch.no_grad():
+                rgbs, disps, masks = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation)
+            test_loss = img2mse(torch.Tensor(rgbs), images[i_test]).cpu()
+            
+            test_psnr = mse2psnr(test_loss).cpu()
 
             plot_loss.update('train loss', i, loss.item())
-            plot_loss.update('test loss', i, test_loss)
+            plot_loss.update('test loss', i, test_loss.numpy())
             plot_psnr.update('train psnr', i, psnr.item())
-            plot_psnr.update('test psnr', i, test_psnr)
+            plot_psnr.update('test psnr', i, test_psnr.numpy())
+
             
-            if i%50*args.i_visdom==0:
-                rgbs, disps = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-                if args.segmentation:
-                    _, _, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation)
-                    plot_img.video(masks, 'mask, iter : '+str(i))
+            #if i%2*args.i_visdom==0:
+            #    if args.segmentation:
+            #        plot_mask.image(masks[0])
                     
-                plot_vid.video(disps, 'disp, iter : '+str(i))
-                plot_vid.video(rgbs, 'rgb, iter : '+str(i))
+                
+            #    plot_disp.image(disps[0])
+            #    plot_rgb.image(rgbs[0])
             
             time.sleep(0.05)
             
