@@ -156,7 +156,7 @@ def render(H, W, focal, chunk=1024*32, rays=None, c2w=None, ndc=True,
 
 
 
-def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0, segmentation=False):
+def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_factor=0, segmentation=False):
 
     H, W, focal = hwf
 
@@ -186,12 +186,6 @@ def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=N
         #if i==0:
         #    print(rgb.shape, disp.shape)
 
-       # """
-       # if gt_imgs is not None and render_factor==0:
-       #     p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
-       #     print(p)
-       # """
-
         if savedir is not None:
             rgb8 = to8b(rgbs[-1])
             rgb8[np.isnan(rgb8)] = 0
@@ -220,7 +214,7 @@ def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=N
     return rgbs, disps, masks
 
 
-def render_test_ray(rays_o, rays_d, hwf, ndc, near, far, use_viewdirs, N_samples, network, network_query_fn, **kwargs):
+def render_test_ray(rays_o, rays_d, hwf, ndc, near, far, use_viewdirs, N_samples, network, network_query_fn, segmentation=False, **kwargs):
     H, W, focal = hwf
     if use_viewdirs:
         # provide ray directions as input
@@ -243,9 +237,9 @@ def render_test_ray(rays_o, rays_d, hwf, ndc, near, far, use_viewdirs, N_samples
 
     z_vals = z_vals.reshape([rays_o.shape[0], N_samples])
 
-    rgb, sigma, depth_maps, weights = sample_sigma(rays_o, rays_d, viewdirs, network, z_vals, network_query_fn)
+    rgb, mask, sigma, depth_maps, weights = sample_sigma(rays_o, rays_d, viewdirs, network, z_vals, network_query_fn, segmentation=segmentation)
 
-    return rgb, sigma, z_vals, depth_maps, weights
+    return rgb, mask, sigma, z_vals, depth_maps, weights
 
 
 def create_nerf(args):
@@ -560,6 +554,8 @@ def config_parser():
 
     parser.add_argument("--render_only", action='store_true', 
                         help='do not optimize, reload weights and render out render_poses path')
+    parser.add_argument("--render_frames", action='store_true', 
+                        help='render out render_poses frames')
     parser.add_argument("--render_test", action='store_true', 
                         help='render the test set instead of render_poses path')
     parser.add_argument("--render_test_ray", action='store_true', 
@@ -845,12 +841,6 @@ def train():
     if args.render_only:
         print('RENDER ONLY')
         with torch.no_grad():
-            if args.render_test:
-                # render_test switches to test poses
-                images = images[i_test]
-            else:
-                # Default is smoother render_poses path
-                images = None
 
             if args.render_test:
                 testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test', start))
@@ -858,31 +848,24 @@ def train():
                 testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('train', start))
             else:
                 testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('path', start))
+
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', render_poses.shape)
 
-            if args.render_test_ray:
-                # rays_o, rays_d = get_rays(H, W, focal, render_poses[0])
-                index_pose = i_train[0]
-                rays_o, rays_d = get_rays_by_coord_np(H, W, focal, poses[index_pose,:3,:4], depth_gts[index_pose]['coord'])
-                rays_o, rays_d = torch.Tensor(rays_o).to(device), torch.Tensor(rays_d).to(device)
-                rgb, sigma, z_vals, depth_maps, weights = render_test_ray(rays_o, rays_d, hwf, network=render_kwargs_test['network_fine'], **render_kwargs_test)
-                # sigma = sigma.reshape(H, W, -1).cpu().numpy()
-                # z_vals = z_vals.reshape(H, W, -1).cpu().numpy()
-                # np.savez(os.path.join(testsavedir, 'rays.npz'), rgb=rgb.cpu().numpy(), sigma=sigma.cpu().numpy(), z_vals=z_vals.cpu().numpy())
-                # visualize_sigma(sigma[0, :].cpu().numpy(), z_vals[0, :].cpu().numpy(), os.path.join(testsavedir, 'rays.png'))
-                for k in range(20):
-                    visualize_weights(weights[k*100, :].cpu().numpy(), z_vals[k*100, :].cpu().numpy(), os.path.join(testsavedir, f'rays_weights_%d.png' % k))
-                print("colmap depth:", depth_gts[index_pose]['depth'][0])
-                print("Estimated depth:", depth_maps[0].cpu().numpy())
-                print(depth_gts[index_pose]['coord'])
-            else:
-                rgbs, disps = render_path(render_poses, hwf, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
-                print('Done rendering', testsavedir)
-                imageio.mimwrite(os.path.join(testsavedir, 'rgb.mp4'), to8b(rgbs), fps=30, quality=8)
-                disps[np.isnan(disps)] = 0
-                print('Depth stats', np.mean(disps), np.max(disps), np.percentile(disps, 95))
-                imageio.mimwrite(os.path.join(testsavedir, 'disp.mp4'), to8b(disps / np.percentile(disps, 95)), fps=30, quality=8)
+            savedir = None
+            if args.render_frames:
+                savedir = testsavedir
+            
+            rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, savedir=savedir, render_factor=args.render_factor, segmentation=args.segmentation)
+            print('Done rendering', testsavedir)
+
+            imageio.mimwrite(os.path.join(testsavedir, 'rgb.mp4'), to8b(rgbs), fps=30, quality=8)
+            disps[np.isnan(disps)] = 0
+            print('Depth stats', np.mean(disps), np.max(disps), np.percentile(disps, 95))
+            imageio.mimwrite(os.path.join(testsavedir, 'disp.mp4'), to8b(disps / np.percentile(disps, 95)), fps=30, quality=8)
+
+            if args.segmentation:
+                imageio.mimwrite(os.path.join(testsavedir, 'mask.mp4'), to8b(masks), fps=30, quality=8)
 
             
             return
@@ -1272,7 +1255,7 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
-                rgbs, disps, masks = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir, segmentation=args.segmentation)
+                rgbs, disps, masks = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, savedir=testsavedir, segmentation=args.segmentation)
             print('Saved test set')
 
             filenames = [os.path.join(testsavedir, '{:03d}.png'.format(k)) for k in range(len(i_test))]
@@ -1286,14 +1269,14 @@ def train():
 
         
 
-        if i%args.i_visdom==0 and i > 0 and len(i_test) > 0:
+        if i%args.i_visdom==0 and i > 0 and len(i_test) > 0 or i==100:
             with torch.no_grad():
                 rgbs, disps, masks = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation)
             test_loss = img2mse(torch.Tensor(rgbs), images[i_test]).cpu()
             
             test_psnr = mse2psnr(test_loss).cpu()
 
-            plot_loss.update('train loss', i, loss.item())
+            plot_loss.update('train loss', i, img_loss.item())
             plot_loss.update('test loss', i, test_loss.numpy())
             plot_psnr.update('train psnr', i, psnr.item())
             plot_psnr.update('test psnr', i, test_psnr.numpy())
