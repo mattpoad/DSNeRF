@@ -316,10 +316,11 @@ def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True,
             rads[2] = 0.
             N_rots = 1
             N_views/=2
+            N_views = int(N_views)
 
         # Generate poses for spiral path
         render_poses = render_path_spiral(c2w_path, up, rads, focal, zdelta, zrate=.5, rots=N_rots, N=N_views)
-        
+
         
     render_poses = np.array(render_poses).astype(np.float32)
 
