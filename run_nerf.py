@@ -34,7 +34,7 @@ import cv2
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.cuda.set_device(3)
+torch.cuda.set_device(2)
 np.random.seed(0)
 DEBUG = False
 
@@ -212,34 +212,6 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
     masks = np.stack(masks,0)
 
     return rgbs, disps, masks
-
-
-def render_test_ray(rays_o, rays_d, hwf, ndc, near, far, use_viewdirs, N_samples, network, network_query_fn, segmentation=False, **kwargs):
-    H, W, focal = hwf
-    if use_viewdirs:
-        # provide ray directions as input
-        viewdirs = rays_d
-        viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
-        viewdirs = torch.reshape(viewdirs, [-1,3]).float()
-
-    if ndc:
-        # for forward facing scenes
-        rays_o, rays_d = ndc_rays(H, W, focal, 1., rays_o, rays_d)
-
-    # Create ray batch
-    rays_o = torch.reshape(rays_o, [-1,3]).float()
-    rays_d = torch.reshape(rays_d, [-1,3]).float()
-
-    near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
-
-    t_vals = torch.linspace(0., 1., steps=N_samples).to(device)
-    z_vals = near * (1.-t_vals) + far * (t_vals)
-
-    z_vals = z_vals.reshape([rays_o.shape[0], N_samples])
-
-    rgb, mask, sigma, depth_maps, weights = sample_sigma(rays_o, rays_d, viewdirs, network, z_vals, network_query_fn, segmentation=segmentation)
-
-    return rgb, mask, sigma, z_vals, depth_maps, weights
 
 
 def create_nerf(args):
@@ -621,6 +593,8 @@ def config_parser():
                         help='frequency of render_poses video saving')
     parser.add_argument("--i_visdom",   type=int, default=100, 
                         help='frequency of visdom display')
+    parser.add_argument("--visdom_name",   type=str, default='DSNeRF', 
+                        help='name of the visdom environment')    
     
     
     # debug
@@ -671,8 +645,8 @@ def config_parser():
 
 class Plot:
     
-    def __init__(self, title, xlabel='xlabel', ylabel='ylabel', legends=['legend']):
-        self.vis = visdom.Visdom(server='10.10.77.108', port=8099, env='DSNeRF')
+    def __init__(self, title, xlabel='xlabel', ylabel='ylabel', legends=['legend'], env='DSNeRF'):
+        self.vis = visdom.Visdom(server='10.10.77.108', port=8099, env=env)
         self.win = None
         self.opts = dict(
             title = title,
@@ -997,12 +971,12 @@ def train():
     
     start = start + 1
 
-    plot_loss = Plot('Loss', 'Step', 'Loss', ['train loss', 'test loss'])
-    plot_psnr = Plot('PSNR', 'Step', 'PSNR', ['train psnr', 'test psnr'])
+    plot_loss = Plot('Loss', 'Step', 'Loss', ['train loss', 'test loss'], env=args.visdom_name)
+    plot_psnr = Plot('PSNR', 'Step', 'PSNR', ['train psnr', 'test psnr'], env=args.visdom_name)
     if args.segmentation:
         plot_mask = Plot('mask')
-    plot_disp = Plot('disp')
-    plot_rgb = Plot('rgb')
+    plot_disp = Plot('disp', env=args.visdom_name)
+    plot_rgb = Plot('rgb', env=args.visdom_name)
     
     for i in trange(start, N_iters):
         time0 = time.time()

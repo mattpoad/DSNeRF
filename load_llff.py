@@ -91,7 +91,8 @@ def _load_data(basedir, directory='images', downsample=True, factor=None, width=
             sfx = '_{}x{}'.format(width, height)
         else:
             factor = 1
-
+    else:
+        factor = 1
     
     imgdir = os.path.join(basedir, directory + sfx)
         
