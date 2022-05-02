@@ -34,7 +34,7 @@ import cv2
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.cuda.set_device(2)
+
 np.random.seed(0)
 DEBUG = False
 
@@ -209,7 +209,8 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
 
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
-    masks = np.stack(masks,0)
+    if segmentation:
+        masks = np.stack(masks,0)
 
     return rgbs, disps, masks
 
@@ -479,7 +480,10 @@ def config_parser():
                         help='where to store ckpts and logs')
     parser.add_argument("--datadir", type=str, default='./data/llff/fern', 
                         help='input data directory')
+    parser.add_argument("--gpu", type=int, default=3, 
+                        help='gpu used for training')
 
+    
     # training options
     parser.add_argument("--netdepth", type=int, default=8, 
                         help='layers in network')
@@ -679,6 +683,7 @@ def train():
     parser = config_parser()
     args = parser.parse_args()
 
+    torch.cuda.set_device(args.gpu)
 
     if args.dataset_type == 'llff':
         if args.colmap_depth:
@@ -687,7 +692,7 @@ def train():
         if args.downsample:
             factor = args.factor
         else:
-            factor = None
+            factor = 1
 
         
         images, poses, bds, render_poses, i_test = load_llff_data('images', args.datadir, args.downsample, factor,
@@ -1199,11 +1204,11 @@ def train():
             }, path)
             print('Saved checkpoints at', path)
 
-        if args.i_video > 0 and i%args.i_video==0 and i > 0 or i==1000:
+        if args.i_video > 0 and i%args.i_video==0 and i > start or i==1000:
             # Turn on testing mode
             with torch.no_grad():
                 rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation)
-                print('Done, saving', rgbs.shape, disps.shape, masks.shape)
+                print('Done, saving')
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
             if not args.segmentation:
                 imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)

@@ -75,7 +75,7 @@ def _load_data(basedir, directory='images', downsample=True, factor=None, width=
     sfx = ''
 
     if downsample:
-        if factor is not None:
+        if factor is not None and factor>1:
             sfx = '_{}'.format(factor)
             _minify(basedir, imgs_type=directory, factors=[factor])
             factor = factor
@@ -91,8 +91,7 @@ def _load_data(basedir, directory='images', downsample=True, factor=None, width=
             sfx = '_{}x{}'.format(width, height)
         else:
             factor = 1
-    else:
-        factor = 1
+    
     
     imgdir = os.path.join(basedir, directory + sfx)
         

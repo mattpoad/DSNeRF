@@ -159,7 +159,7 @@ def segmentation_mask(args):
     sem_class_to_idx = {cls: idx for (idx, cls) in enumerate(sem_classes)}
 
     prev_i = 0
-    for i in range(N_batch, len(batch), N_batch):
+    for i in range(N_batch, len(batch), N_batch): #the batch is splited in order to prevent a gpu mermory error
 
         output = model(normalized_batch[prev_i:i])['out']
         
