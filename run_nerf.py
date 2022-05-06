@@ -543,6 +543,11 @@ def config_parser():
     parser.add_argument("--render_factor", type=int, default=0, 
                         help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
 
+    parser.add_argument("--linear", action='store_true', 
+                        help='set for linear scene')
+    
+    
+    
     # training options
     parser.add_argument("--precrop_iters", type=int, default=0,
                         help='number of steps to train on central crops')
@@ -642,7 +647,7 @@ def config_parser():
     parser.add_argument("--seg_rays_prop", type=float, default=0.1, help="Proportion of segmentation rays")
     parser.add_argument("--seg_lambda", type=float, default=0.1, help="segmentation lambda used for loss")
     parser.add_argument("--mask_data", action='store_true', help="indicates if the images are in a mask format")
-    
+
     return parser
 
 
@@ -697,19 +702,19 @@ def train():
         
         images, poses, bds, render_poses, i_test = load_llff_data('images', args.datadir, args.downsample, factor,
                                                                   recenter=True, bd_factor=.75,
-                                                                  spherify=args.spherify, path_zflat=True)
+                                                                  spherify=args.spherify, path_zflat=True, linear=args.linear)
         
         if args.mask_data:
             images, poses, bds, render_poses, i_test = load_llff_data('masksasimages', args.datadir, factor,
                                                                   recenter=True, bd_factor=.75,
-                                                                  spherify=args.spherify)
+                                                                      spherify=args.spherify, linear=args.linear)
         
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
 
         if args.segmentation:
-            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True)
+            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True, linear=args.linear)
 
             hwf_masks = poses_masks[0,:3,-1]
             H_m, W_m, focal_m = hwf_masks
@@ -1209,7 +1214,10 @@ def train():
             with torch.no_grad():
                 rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation)
                 print('Done, saving')
-            moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+            if args.linear:
+                moviebase = os.path.join(basedir, expname, '{}_linear_{:06d}_'.format(expname, i))
+            else:
+                moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
             if not args.segmentation:
                 imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
                 imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.nanmax(disps)), fps=30, quality=8)
