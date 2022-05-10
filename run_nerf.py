@@ -8,6 +8,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import visdom
+import plotly.express as px
+
+from PIL import Image
 
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
@@ -66,12 +69,12 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     return outputs
 
 
-def batchify_rays(rays_flat, chunk=1024*32, segmentation=False, **kwargs):
+def batchify_rays(rays_flat, chunk=1024*32, segmentation=False, N_lab=2, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(rays_flat[i:i+chunk], segmentation=segmentation, **kwargs)
+        ret = render_rays(rays_flat[i:i+chunk], segmentation=segmentation, N_lab=N_lab, **kwargs)
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -84,7 +87,7 @@ def batchify_rays(rays_flat, chunk=1024*32, segmentation=False, **kwargs):
 def render(H, W, focal, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None, depths=None,
-                  segmentation=False, **kwargs):
+                  segmentation=False, N_lab=2, **kwargs):
     """Render rays
     Args:
       H: int. Height of image in pixels.
@@ -142,7 +145,7 @@ def render(H, W, focal, chunk=1024*32, rays=None, c2w=None, ndc=True,
         rays = torch.cat([rays, viewdirs], -1)
 
     # Render and reshape
-    all_ret = batchify_rays(rays, chunk, segmentation, **kwargs)
+    all_ret = batchify_rays(rays, chunk, segmentation, N_lab=N_lab, **kwargs)
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
@@ -155,8 +158,48 @@ def render(H, W, focal, chunk=1024*32, rays=None, c2w=None, ndc=True,
     return ret_list + [ret_dict]
 
 
+def display_mask(mask):
 
-def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_factor=0, segmentation=False):
+    dict_col = np.array(
+        [
+            [0, 0, 0],  # black                                                                                                                                                                         
+            [0, 255, 0],  # green                                                                                                                                                                         
+            [255, 0, 0],  # red                                                                                                                                                                           
+            [0, 0, 255],  # blue                                                                                                                                                                          
+            [0, 255, 255],  # cyan                                                                                                                                                                        
+            [255, 255, 255],  # white                                                                                                                                                                     
+            [96, 96, 96],  # grey                                                                                                                                                                         
+            [255, 255, 0],  # yellow                                                                                                                                                                      
+            [237, 127, 16],  # orange                                                                                                                                                                     
+            [102, 0, 153],  # purple                                                                                                                                                                      
+            [88, 41, 0],  # brown                                                                                                                                                                         
+            [253, 108, 158],  # pink                                                                                                                                                                    
+            [128, 0, 0],  # maroon                                                                                                                                                                        
+            [255, 0, 255],
+            [255, 0, 127],
+            [0, 128, 255],
+            [0, 102, 51],  # 17                                                                                                                                                                           
+            [192, 192, 192],
+            [128, 128, 0],
+            [84, 151, 120],
+            [127, 255, 0]
+        ]
+    )
+
+    try:
+        len(mask.shape) == 2
+    except AssertionError:
+        print("Mask's shape is not 2")
+    mask_dis = np.zeros((mask.shape[0], mask.shape[1], 3))
+    # print('mask_dis shape',mask_dis.shape)                                                                                                                                                              
+    for i in range(mask.shape[0]):
+        for j in range(mask.shape[1]):
+            mask_dis[i, j, :] = dict_col[int(mask[i, j])]
+    return mask_dis
+
+
+
+def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_factor=0, segmentation=False, N_lab=2):
 
     H, W, focal = hwf
 
@@ -177,8 +220,11 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
         print(i, time.time() - t)
         t = time.time()
         if segmentation:
-            rgb, disp, acc, depth, mask, extras = render(H, W, focal, chunk=chunk, c2w=c2w[:3,:4], retraw=True, segmentation=segmentation, **render_kwargs)
-            masks.append(mask.cpu().numpy())
+            rgb, disp, acc, depth, mask, extras = render(H, W, focal, chunk=chunk, c2w=c2w[:3,:4], retraw=True, segmentation=segmentation, N_lab=N_lab, **render_kwargs)
+            mask = mask.argmax(-1)
+            mask = mask.cpu().float().numpy().astype(np.uint8)
+            mask = display_mask(mask)
+            masks.append(mask)
         else:
             rgb, disp, acc, depth, extras = render(H, W, focal, chunk=chunk, c2w=c2w[:3,:4], retraw=True, **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
@@ -202,7 +248,7 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
                 mask8 = to8b(masks[-1])
                 mask8[np.isnan(mask8)] = 0
                 imageio.imwrite(os.path.join(savedir, '{:03d}_mask.png'.format(i)), mask8)
-                np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), mask=mask.cpu().numpy(), acc=acc.cpu().numpy(), depth=depth)
+                np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), mask=mask, acc=acc.cpu().numpy(), depth=depth)
             else:
                 np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), acc=acc.cpu().numpy(), depth=depth)
 
@@ -211,7 +257,7 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
     disps = np.stack(disps, 0)
     if segmentation:
         masks = np.stack(masks,0)
-
+    
     return rgbs, disps, masks
 
 
@@ -228,13 +274,13 @@ def create_nerf(args):
     skips = [4]
     if args.alpha_model_path is None:
         model = NeRF(D=args.netdepth, W=args.netwidth,
-                         input_ch=input_ch, output_ch=output_ch, skips=skips,
+                         input_ch=input_ch, N_lab=args.N_lab, output_ch=output_ch, skips=skips,
                          input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs, segmentation=args.segmentation).to(device)
 
         grad_vars = list(model.parameters())
     else:
         alpha_model = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
-                            input_ch=input_ch, output_ch=output_ch, skips=skips,
+                            input_ch=input_ch, N_lab=args.N_lab, output_ch=output_ch, skips=skips,
                             input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs, segmentation=args.segmentation).to(device)
         print('Alpha model reloading from', args.alpha_model_path)
         ckpt = torch.load(args.alpha_model_path)
@@ -253,7 +299,7 @@ def create_nerf(args):
     if args.N_importance > 0:
         if args.alpha_model_path is None:
             model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
-                            input_ch=input_ch, output_ch=output_ch, skips=skips,
+                            input_ch=input_ch, N_lab=args.N_lab, output_ch=output_ch, skips=skips,
                               input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs, segmentation=args.segmentation).to(device)
         else:
             model_fine = NeRF_RGB(D=args.netdepth_fine, W=args.netwidth_fine,
@@ -344,7 +390,8 @@ def render_rays(ray_batch,
                 verbose=False,
                 pytest=False,
                 sigma_loss=None,
-                segmentation=False):
+                segmentation=False,
+                N_lab=2):
     """Volumetric rendering.
     Args:
       ray_batch: array of shape [batch_size, ...]. All information necessary
@@ -411,7 +458,7 @@ def render_rays(ray_batch,
 #     raw = run_network(pts)
     if network_fn is not None:
         raw = network_query_fn(pts, viewdirs, network_fn)
-        rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest, segmentation=segmentation)
+        rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest, segmentation=segmentation, N_lab=N_lab)
     else:
         # rgb_map, disp_map, acc_map = None, None, None
         # raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
@@ -419,10 +466,10 @@ def render_rays(ray_batch,
         # alpha = network_query_fn(pts, viewdirs, network_fine.alpha_model)[...,3]
         if network_fine.alpha_model is not None:
             raw = network_query_fn(pts, viewdirs, network_fine.alpha_model)
-            rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest, segmentation=segmentation)
+            rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest, segmentation=segmentation, N_lab=N_lab)
         else:
             raw = network_query_fn(pts, viewdirs, network_fine)
-            rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest, segmentation=segmentation)
+            rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest, segmentation=segmentation, N_lab=N_lab)
 
 
     if N_importance > 0:
@@ -440,7 +487,7 @@ def render_rays(ray_batch,
 #         raw = run_network(pts, fn=run_fn)
         raw = network_query_fn(pts, viewdirs, run_fn)
 
-        rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest, segmentation=segmentation)
+        rgb_map, disp_map, acc_map, weights, depth_map, seg_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest, segmentation=segmentation, N_lab=N_lab)
 
     if not segmentation:
         ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map, 'depth_map' : depth_map}
@@ -648,6 +695,8 @@ def config_parser():
     parser.add_argument("--seg_lambda", type=float, default=0.1, help="segmentation lambda used for loss")
     parser.add_argument("--mask_data", action='store_true', help="indicates if the images are in a mask format")
 
+    parser.add_argument("--N_lab", type=int, default=2, help="number of labels")
+    
     return parser
 
 
@@ -677,11 +726,23 @@ class Plot:
             self.win = self.vis.line(X=[x], Y=[y], name=legend, opts=self.opts)
         else:
             self.vis.line(X=[x], Y=[y], win=self.win, name=legend, update='append', opts=self.opts)
+
+class Plot_image:
+
+    def __init__(self, title, env):
+        self.vis = visdom.Visdom(server='10.10.77.108', port=8099, env=env)
+        self.win = None
+        self.title = title
+        
     def image(self, img):
+        img8 = to8b(img)
+        img8[np.isnan(img8)] = 0
+        if self.title != 'disp':
+            img8 = np.transpose(img8, [2,0,1])
         if self.win == None:
-            self.win = self.vis.image(img)
+            self.win = self.vis.image(img8)
         else:
-            self.vis.images(img)
+            self.vis.image(img8, win=self.win)
 
 def train():
 
@@ -920,13 +981,18 @@ def train():
             if args.debug:
                 print('rays.shape:', rays.shape)
             print('done, concats')
-            
-            rays_seg = np.concatenate([rays, masks[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
+
+            print(f"---- masks.shape {masks.shape}")
+            print(f"---- masks[:,None,:,:,None].shape {masks[:,None,:,:,None].shape}")
+            print(f"---- rays.shape {rays.shape}")
+            masks = np.concatenate([masks[:,None,:,:,None],masks[:,None,:,:,None],masks[:,None,:,:,None]],4)
+
+            rays_seg = np.concatenate([rays, masks], 1) # [N, ro+rd+lab, H, W, 3]
             if args.debug:
                 print('rays_seg.shape:', rays_seg.shape)
-            rays_seg = np.transpose(rays_seg, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
+            rays_seg = np.transpose(rays_seg, [0,2,3,1,4]) # [N, H, W, ro+rd+lab] , 3]
             rays_seg = np.stack([rays_seg[i] for i in i_train], 0) # train images only
-            rays_seg = np.reshape(rays_seg, [-1,3,3]) # ?? [(N-1)*H*W, ro+rd+rgb, 3]
+            rays_seg = np.reshape(rays_seg, [-1,3,3]) # ?? [(N-1)*H*W, ro+rd+lab, 3]
             rays_seg = rays_seg.astype(np.float32)
             print('shuffle rays')
             np.random.shuffle(rays_seg)
@@ -981,12 +1047,14 @@ def train():
     
     start = start + 1
 
-    plot_loss = Plot('Loss', 'Step', 'Loss', ['train loss', 'test loss'], env=args.visdom_name)
-    plot_psnr = Plot('PSNR', 'Step', 'PSNR', ['train psnr', 'test psnr'], env=args.visdom_name)
+    criterion = nn.CrossEntropyLoss()
+    
+    plot_loss = Plot('Loss', 'Step', 'Loss', ['train loss', 'test loss'], env=args.expname)
+    plot_psnr = Plot('PSNR', 'Step', 'PSNR', ['train psnr', 'test psnr'], env=args.expname)
     if args.segmentation:
-        plot_mask = Plot('mask')
-    plot_disp = Plot('disp', env=args.visdom_name)
-    plot_rgb = Plot('rgb', env=args.visdom_name)
+        plot_mask = Plot_image('mask', args.expname+'_image')
+    plot_disp = Plot_image('disp', args.expname+'_image')
+    plot_rgb = Plot_image('rgb', args.expname+'_image')
     
     for i in trange(start, N_iters):
         time0 = time.time()
@@ -1024,9 +1092,8 @@ def train():
                     batch_seg = next(raysSeg_iter).to(device)
                 batch_seg = torch.transpose(batch_seg, 0, 1)
                 batch_rays_seg = batch_seg[:2]
-                target_seg = batch_seg[2]
+                target_seg = batch_seg[2][:,0].type(torch.LongTensor).to(device)
 
-                
             # i_batch += N_rand
             # if i_batch >= rays_rgb.shape[0] or (args.colmap_depth and i_batch >= rays_depth.shape[0]):
             #     print("Shuffle data after an epoch!")
@@ -1089,7 +1156,7 @@ def train():
     
         if args.segmentation:
             _, _, _, _, mask, _ = render(H, W, focal, chunk=args.chunk, rays=batch_rays,
-                                        segmentation=args.segmentation, verbose=i < 10, retraw=True,
+                                         segmentation=args.segmentation, N_lab=args.N_lab, verbose=i < 10, retraw=True,
                                         **render_kwargs_train)
 
         
@@ -1146,7 +1213,13 @@ def train():
 
         seg_loss=0
         if args.segmentation:
-            seg_loss = img2mse(mask, target_seg)
+#            print(f"mask {mask}")
+#            print(f"mask shape {mask.shape}")
+#            print(f"target_seg {target_seg}")
+#            print(f"target_seg shape {target_seg.shape}")
+#            print(f"{batch_seg.shape}")
+            seg_loss = criterion(mask, target_seg)
+            ##seg_loss = img2mse(mask, target_seg)
         sigma_loss = 0
         if args.sigma_loss:
             sigma_loss = extras_col['sigma_loss'].mean()
@@ -1209,10 +1282,10 @@ def train():
             }, path)
             print('Saved checkpoints at', path)
 
-        if args.i_video > 0 and i%args.i_video==0 and i > start or i==1000:
+        if args.i_video > 0 and i%args.i_video==0 and i > start or i==100 or i ==1000:
             # Turn on testing mode
             with torch.no_grad():
-                rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation)
+                rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation, N_lab=args.N_lab)
                 print('Done, saving')
             if args.linear:
                 moviebase = os.path.join(basedir, expname, '{}_linear_{:06d}_'.format(expname, i))
@@ -1242,7 +1315,7 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
-                rgbs, disps, masks = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, savedir=testsavedir, segmentation=args.segmentation)
+                rgbs, disps, masks = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, savedir=testsavedir, segmentation=args.segmentation, N_lab=args.N_lab)
             print('Saved test set')
 
             filenames = [os.path.join(testsavedir, '{:03d}.png'.format(k)) for k in range(len(i_test))]
@@ -1258,7 +1331,7 @@ def train():
 
         if i%args.i_visdom==0 and i > 0 and len(i_test) > 0 or i==100:
             with torch.no_grad():
-                rgbs, disps, masks = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation)
+                rgbs, disps, masks = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation, N_lab=args.N_lab)
             test_loss = img2mse(torch.Tensor(rgbs), images[i_test]).cpu()
             
             test_psnr = mse2psnr(test_loss).cpu()
@@ -1267,16 +1340,18 @@ def train():
             plot_loss.update('test loss', i, test_loss.numpy())
             plot_psnr.update('train psnr', i, psnr.item())
             plot_psnr.update('test psnr', i, test_psnr.numpy())
-
             
-            #if i%2*args.i_visdom==0:
-            #    if args.segmentation:
-            #        plot_mask.image(masks[0])
-                    
                 
-            #    plot_disp.image(disps[0])
-            #    plot_rgb.image(rgbs[0])
             
+            disps = disps / np.nanmax(disps)
+            plot_disp.image(disps[0])
+            plot_rgb.image(rgbs[0])
+            if args.segmentation:
+                plot_mask.image(masks[0])
+            
+
+##########################################
+                
             time.sleep(0.05)
             
     

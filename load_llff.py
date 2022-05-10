@@ -103,7 +103,7 @@ def _load_data(basedir, directory='images', downsample=True, factor=None, width=
     if poses.shape[-1] != len(imgfiles):
         print( 'Mismatch between imgs {} and poses {} !!!!'.format(len(imgfiles), poses.shape[-1]) )
         return
-    
+
     sh = imageio.imread(imgfiles[0]).shape
     poses[:2, 4, :] = np.array(sh[:2]).reshape([2, 1])
     poses[2, 4, :] = poses[2, 4, :] * 1./factor
@@ -114,16 +114,23 @@ def _load_data(basedir, directory='images', downsample=True, factor=None, width=
     def imread(f):
         if f.endswith('png'):
             if directory=='masks' or masksasimage:
-                return imageio.imread(f, ignoregamma=True, pilmode="RGB")
+                return imageio.imread(f, ignoregamma=True)
+                ## return imageio.imread(f, ignoregamma=True, pilmode='RGB')
             else:
                 return imageio.imread(f, ignoregamma=True)
         else:
             if directory=='masks' or masksasimage:
-                return imageio.imread(f, pilmode="RGB")
+                return imageio.imread(f)
+                ## return imageio.imread(f, pilmode='RGB')
             else:
                 return imageio.imread(f)
-        
-    imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
+
+    if directory=='masks':
+        imgs = imgs = [imread(f) for f in imgfiles]
+        print(f"imgs[0] {imgs[0][100]}")
+    else:
+        imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
+
     imgs = np.stack(imgs, -1)  
     
     print('Loaded image data', imgs.shape, poses[:,-1,0])
@@ -158,6 +165,18 @@ def poses_avg(poses):
     return c2w
 
 
+def poses_linear(poses):
+    hwf = poses[0, :3, -1:]
+
+    init_pos = poses[:, :3, 3][0]
+    end_pos = poses[:, :3, 3][-1]
+    vec2 = normalize(poses[:, :3, 2].sum(0))
+    up = poses[:, :3, 1].sum(0)
+    #init_c2w = np.concatenate([viewmatrix(vec2, up, init_pos), hwf], 1)
+    #end_c2w = np.concatenate([viewmatrix(vec2, up, end_pos), hwf], 1)
+    
+    return hwf, vec2, up, init_pos, end_pos
+
 
 def render_path_spiral(c2w, up, rads, focal, zdelta, zrate, rots, N):
     render_poses = []
@@ -169,7 +188,21 @@ def render_path_spiral(c2w, up, rads, focal, zdelta, zrate, rots, N):
         z = normalize(c - np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.])))
         render_poses.append(np.concatenate([viewmatrix(z, up, c), hwf], 1))
     return render_poses
+
+
+def render_path_linear(hwf, vec2, up, init_pos, end_pos, N):
+    render_poses = []
+    #hwf = init_c2w[:,4:5]
+
+    #init_pos = init_c2w[:, :3, 3][0]
+    #end_pos = end_c2w[:, :3, 3][-1]
     
+    for x in np.linspace(0., 1., N+1)[:-1]:
+        new_pos = x*(end_pos - init_pos)
+        new_c2w = np.concatenate([viewmatrix(vec2, up, new_pos), hwf], 1)
+        render_poses.append(new_c2w)
+    return render_poses
+
 
 
 def recenter_poses(poses):
@@ -250,7 +283,7 @@ def spherify_poses(poses, bds):
 
 
 
-def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
+def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, linear=False):
     
     if imgs_type == 'images':
         poses, bds, imgs = _load_data(basedir, downsample=downsample, factor=factor) # factor=8 downsamples original imgs by 8x
@@ -281,8 +314,13 @@ def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True,
 
     if recenter:
         poses = recenter_poses(poses)
+
+    if linear:
+        hwf, vec2, up, init_pos, end_pos = poses_linear(poses)
+        N_views = 100
+        render_poses = render_path_linear(hwf, vec2, up, init_pos, end_pos, N=N_views)
         
-    if spherify:
+    elif spherify:
         poses, render_poses, bds = spherify_poses(poses, bds)
 
     else:
@@ -332,7 +370,10 @@ def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True,
     i_test = np.argmin(dists)
     print('HOLDOUT view is', i_test)
     
-    images = images.astype(np.float32)
+    if imgs_type=='masks':
+        images = images.astype(np.int)
+    else:
+        images = images.astype(np.float32)
     poses = poses.astype(np.float32)
 
     return images, poses, bds, render_poses, i_test
