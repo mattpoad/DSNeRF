@@ -694,7 +694,8 @@ def config_parser():
     parser.add_argument("--seg_rays_prop", type=float, default=0.1, help="Proportion of segmentation rays")
     parser.add_argument("--seg_lambda", type=float, default=0.1, help="segmentation lambda used for loss")
     parser.add_argument("--mask_data", action='store_true', help="indicates if the images are in a mask format")
-
+    parser.add_argument("--mask_scene", nargs='+', type=int, help="id of mask scenes used for train")
+    
     parser.add_argument("--N_lab", type=int, default=2, help="number of labels")
     
     return parser
@@ -843,7 +844,14 @@ def train():
         else:
             i_train = np.array([i for i in args.train_scene if
                         (i not in i_test and i not in i_val)])
-        
+
+        if args.mask_scene is None:
+            i_masks = i_train
+
+        else:
+            i_masks = np.array([i for i in args.mask_scene if
+                        (i not in i_test and i not in i_val)])
+            
         near = 0.1
         far = 5.0
         if args.colmap_depth:
@@ -1005,7 +1013,7 @@ def train():
             if args.debug:
                 print('rays_seg.shape:', rays_seg.shape)
             rays_seg = np.transpose(rays_seg, [0,2,3,1,4]) # [N, H, W, ro+rd+lab] , 3]
-            rays_seg = np.stack([rays_seg[i] for i in i_train], 0) # train images only
+            rays_seg = np.stack([rays_seg[i] for i in i_masks], 0) # train masks only
             rays_seg = np.reshape(rays_seg, [-1,3,3]) # ?? [(N-1)*H*W, ro+rd+lab, 3]
             rays_seg = rays_seg.astype(np.float32)
             print('shuffle rays')
@@ -1053,6 +1061,8 @@ def train():
     N_iters = args.N_iters + 1
     print('Begin')
     print('TRAIN views are', i_train)
+    if args.segmentation:
+        print('TRAIN views for masks are', i_masks)
     print('TEST views are', i_test)
     print('VAL views are', i_val)
 
