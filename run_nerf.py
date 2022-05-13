@@ -213,9 +213,9 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
     disps = []    
     masks = []
         
-    t = time.time()
     if len(render_poses)>10:
         print(f"...loading {len(render_poses)} frames")
+    t = time.time()
     for i, c2w in enumerate(render_poses):
         print(i, time.time() - t)
         t = time.time()
@@ -369,8 +369,6 @@ def create_nerf(args):
 
     if args.sigma_loss:
         render_kwargs_train['sigma_loss'] = SigmaLoss(args.N_samples, args.perturb, args.raw_noise_std)
-
-    ##########################
 
 
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
@@ -592,6 +590,8 @@ def config_parser():
 
     parser.add_argument("--linear", action='store_true', 
                         help='set for linear scene')
+    parser.add_argument("--sideview", action='store_true', 
+                        help='set for linear scene with sideview')
     
     
     
@@ -734,16 +734,30 @@ class Plot_image:
         self.win = None
         self.title = title
         
-    def image(self, img):
+    def image(self, img, i):
         img8 = to8b(img)
         img8[np.isnan(img8)] = 0
+        title = self.title+'_iter_'+str(i)
         if self.title != 'disp':
             img8 = np.transpose(img8, [2,0,1])
         if self.win == None:
-            self.win = self.vis.image(img8)
+            self.win = self.vis.image(img8, opts={'title': title})
         else:
-            self.vis.image(img8, win=self.win)
+            self.vis.image(img8, win=self.win, opts={'title': title})
 
+
+    def images(self, imgs, i):
+        imgs8 = [to8b(img) for img in imgs]
+        title = self.title+'_iter_'+str(i)
+        
+        imgs8 = [np.transpose(img8, [2,0,1]) for img8 in imgs8]
+
+        if self.win == None:
+            self.win = self.vis.images(imgs8, opts={'title': title})
+        else:
+            self.vis.images(imgs8, win=self.win, opts={'title': title})
+
+            
 def train():
 
     parser = config_parser()
@@ -763,19 +777,19 @@ def train():
         
         images, poses, bds, render_poses, i_test = load_llff_data('images', args.datadir, args.downsample, factor,
                                                                   recenter=True, bd_factor=.75,
-                                                                  spherify=args.spherify, path_zflat=True, linear=args.linear)
+                                                                  spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview)
         
         if args.mask_data:
             images, poses, bds, render_poses, i_test = load_llff_data('masksasimages', args.datadir, factor,
                                                                   recenter=True, bd_factor=.75,
-                                                                      spherify=args.spherify, linear=args.linear)
+                                                                      spherify=args.spherify, linear=args.linear, sideview=args.sideview)
         
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
 
         if args.segmentation:
-            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True, linear=args.linear)
+            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview)
 
             hwf_masks = poses_masks[0,:3,-1]
             H_m, W_m, focal_m = hwf_masks
@@ -1049,13 +1063,17 @@ def train():
 
     criterion = nn.CrossEntropyLoss()
     
-    plot_loss = Plot('Loss', 'Step', 'Loss', ['train loss', 'test loss'], env=args.expname)
+    plot_lossimg = Plot('Loss_img', 'Step', 'Loss', ['train loss', 'test loss'], env=args.expname)
     plot_psnr = Plot('PSNR', 'Step', 'PSNR', ['train psnr', 'test psnr'], env=args.expname)
-    if args.segmentation:
-        plot_mask = Plot_image('mask', args.expname+'_image')
-    plot_disp = Plot_image('disp', args.expname+'_image')
-    plot_rgb = Plot_image('rgb', args.expname+'_image')
+    plot_loss = Plot('Loss', 'Step', 'Loss', ['train loss', 'test loss'], env=args.expname)
     
+    plot_disp = Plot_image('disp', args.expname)
+
+    if args.segmentation:
+        plot_imgs = Plot_image('rgb_mask', args.expname)
+    else:
+        plot_rgb = Plot_image('rgb', args.expname)
+        
     for i in trange(start, N_iters):
         time0 = time.time()
 
@@ -1282,15 +1300,15 @@ def train():
             }, path)
             print('Saved checkpoints at', path)
 
-        if args.i_video > 0 and i%args.i_video==0 and i > start or i==100 or i ==1000:
+        if args.i_video > 0 and i%args.i_video==0 and i > start or i ==1000:
             # Turn on testing mode
             with torch.no_grad():
                 rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation, N_lab=args.N_lab)
                 print('Done, saving')
             if args.linear:
-                moviebase = os.path.join(basedir, expname, '{}_linear_{:06d}_'.format(expname, i))
+                moviebase = os.path.join(basedir, expname, '{}_linear_{:07d}_'.format(expname, i))
             else:
-                moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+                moviebase = os.path.join(basedir, expname, '{}_spiral_{:07d}_'.format(expname, i))
             if not args.segmentation:
                 imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
                 imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.nanmax(disps)), fps=30, quality=8)
@@ -1309,9 +1327,9 @@ def train():
             #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
             #     render_kwargs_test['c2w_staticcam'] = None
             #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
-
+ 
         if i%args.i_testset==0 and i > 0 and len(i_test) > 0 or i==1000:
-            testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
+            testsavedir = os.path.join(basedir, expname, 'testset_{:07d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
@@ -1336,21 +1354,21 @@ def train():
             
             test_psnr = mse2psnr(test_loss).cpu()
 
-            plot_loss.update('train loss', i, img_loss.item())
-            plot_loss.update('test loss', i, test_loss.numpy())
+            plot_lossimg.update('train loss', i, img_loss.item())
+            plot_lossimg.update('test loss', i, test_loss.numpy())
             plot_psnr.update('train psnr', i, psnr.item())
             plot_psnr.update('test psnr', i, test_psnr.numpy())
-            
+
+            plot_loss.update('nerf loss', i, loss.item())
                 
             
             disps = disps / np.nanmax(disps)
-            plot_disp.image(disps[0])
-            plot_rgb.image(rgbs[0])
+            plot_disp.image(disps[0], i)
             if args.segmentation:
-                plot_mask.image(masks[0])
-            
-
-##########################################
+                #plot_mask.image(masks[0], i)
+                plot_imgs.images([rgbs[0], masks[0]], i)
+            else:
+                plot_rgb.image(rgbs[0], i)
                 
             time.sleep(0.05)
             

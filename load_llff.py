@@ -177,6 +177,17 @@ def poses_linear(poses):
     
     return hwf, vec2, up, init_pos, end_pos
 
+def poses_translation(poses):
+
+    pos = poses[:, :3, 3]
+    T = np.zeros((len(poses)-1, 3))
+
+    for i in range(1, len(poses)):
+        T[i-1] = pos[i] - pos[i-1]
+
+    print(f"---------pos {pos}")
+    return normalize(T.sum(0))
+
 
 def render_path_spiral(c2w, up, rads, focal, zdelta, zrate, rots, N):
     render_poses = []
@@ -184,25 +195,53 @@ def render_path_spiral(c2w, up, rads, focal, zdelta, zrate, rots, N):
     hwf = c2w[:,4:5]
     
     for theta in np.linspace(0., 2. * np.pi * rots, N+1)[:-1]:
-        c = np.dot(c2w[:3,:4], np.array([np.cos(theta), -np.sin(theta), -np.sin(theta*zrate), 1.]) * rads) 
-        z = normalize(c - np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.])))
-        render_poses.append(np.concatenate([viewmatrix(z, up, c), hwf], 1))
+        c = np.dot(c2w[:3,:4], np.array([np.cos(theta), -np.sin(theta), -np.sin(theta*zrate), 1.]) * rads)  # camera position eye
+        # np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.]) center
+        z = normalize(c - np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.])))  # direction
+        render_poses.append(np.concatenate([viewmatrix(z, up, c), hwf], 1)) 
     return render_poses
 
 
-def render_path_linear(hwf, vec2, up, init_pos, end_pos, N):
+def render_path_linear(poses, N, focal=0, sideview=False, freq_sv=30, N_sv=20):
     render_poses = []
-    #hwf = init_c2w[:,4:5]
-
-    #init_pos = init_c2w[:, :3, 3][0]
-    #end_pos = end_c2w[:, :3, 3][-1]
     
-    for x in np.linspace(0., 1., N+1)[:-1]:
+    hwf, vec2, up, init_pos, end_pos = poses_linear(poses)
+
+    if sideview:
+        T = poses_translation(poses)
+        print(f"---------T {T}")
+        print(f"---------T shape {T.shape}")
+        print(f"up shape {up.shape}")
+        tt = poses[:,:3,3]
+        rads = np.percentile(np.abs(tt), 90, 0)
+    
+    for i,x in enumerate(np.linspace(0., 1., N+1)[:-1]):
         new_pos = x*(end_pos - init_pos)
         new_c2w = np.concatenate([viewmatrix(vec2, up, new_pos), hwf], 1)
         render_poses.append(new_c2w)
+        if sideview and i%freq_sv==0:
+            render_poses += render_path_sideview(new_c2w, up, rads, focal, T, N_sv)
+            
     return render_poses
 
+
+
+def render_path_sideview(c2w, up, rads, focal, T, N):
+
+    render_poses = []
+    rads = np.array(list(rads) + [1.])
+    hwf = c2w[:,4:5]
+    pos = c2w[:3, 3]
+    c2w = viewmatrix(T, up, pos)
+    up = c2w[:3, 1]
+
+    for theta in np.linspace(0., 2. * np.pi, N+1)[:-1]:
+        c = np.dot(c2w[:3,:4], np.array([np.cos(theta), -np.sin(theta), -np.sin(theta), 1.]) * rads)  # camera position eye
+        # np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.]) center
+        z = normalize(c - np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.])))  # direction
+        render_poses.append(np.concatenate([viewmatrix(z, up, c), hwf], 1)) 
+    
+    return render_poses
 
 
 def recenter_poses(poses):
@@ -219,8 +258,6 @@ def recenter_poses(poses):
     poses = poses_
     return poses
 
-
-#####################
 
 
 def spherify_poses(poses, bds):
@@ -283,7 +320,7 @@ def spherify_poses(poses, bds):
 
 
 
-def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, linear=False):
+def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, linear=False, sideview=False):
     
     if imgs_type == 'images':
         poses, bds, imgs = _load_data(basedir, downsample=downsample, factor=factor) # factor=8 downsamples original imgs by 8x
@@ -316,9 +353,16 @@ def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True,
         poses = recenter_poses(poses)
 
     if linear:
-        hwf, vec2, up, init_pos, end_pos = poses_linear(poses)
-        N_views = 100
-        render_poses = render_path_linear(hwf, vec2, up, init_pos, end_pos, N=N_views)
+        close_depth, inf_depth = bds.min()*.9, bds.max()*5.
+        dt = .75
+        mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
+        focal = mean_dz
+
+        N_views = 40
+        
+        render_poses = render_path_linear(poses, N=N_views, focal=focal, sideview=sideview)
+        
+            
         
     elif spherify:
         poses, render_poses, bds = spherify_poses(poses, bds)
