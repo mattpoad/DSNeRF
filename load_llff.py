@@ -127,7 +127,6 @@ def _load_data(basedir, directory='images', downsample=True, factor=None, width=
 
     if directory=='masks':
         imgs = imgs = [imread(f) for f in imgfiles]
-        print(f"imgs[0] {imgs[0][100]}")
     else:
         imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
 
@@ -226,6 +225,21 @@ def render_path_linear(poses, N, focal=0, sideview=False, freq_sv=30, N_sv=20):
 
 
 
+def render_path_test(poses, N):
+
+    render_poses = []
+    hwf, vec2, up, init_pos, final_pos = poses_linear(poses)
+    T = poses_translation(poses)
+    
+    for i,x in enumerate(np.linspace(0., 1., N+1)[:-1]):
+        new_pos = x*(final_pos - init_pos)
+        new_c2w = np.concatenate([viewmatrix(T, up, new_pos), hwf], 1)
+        render_poses.append(new_c2w)
+        
+    return render_poses
+
+
+
 def render_path_sideview(c2w, up, rads, focal, T, N):
 
     render_poses = []
@@ -320,7 +334,7 @@ def spherify_poses(poses, bds):
 
 
 
-def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, linear=False, sideview=False):
+def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, linear=False, sideview=False, test=False):
     
     if imgs_type == 'images':
         poses, bds, imgs = _load_data(basedir, downsample=downsample, factor=factor) # factor=8 downsamples original imgs by 8x
@@ -353,14 +367,19 @@ def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True,
         poses = recenter_poses(poses)
 
     if linear:
-        close_depth, inf_depth = bds.min()*.9, bds.max()*5.
-        dt = .75
-        mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
-        focal = mean_dz
+        if test:
+            N_view = 100
+            render_poses = render_path_test(poses, N_view)
 
-        N_views = 40
-        
-        render_poses = render_path_linear(poses, N=N_views, focal=focal, sideview=sideview)
+        else:
+            close_depth, inf_depth = bds.min()*.9, bds.max()*5.
+            dt = .75
+            mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
+            focal = mean_dz
+
+            N_views = 40
+            
+            render_poses = render_path_linear(poses, N=N_views, focal=focal, sideview=sideview)
         
             
         

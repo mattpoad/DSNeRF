@@ -845,13 +845,7 @@ def train():
             i_train = np.array([i for i in args.train_scene if
                         (i not in i_test and i not in i_val)])
 
-        if args.mask_scene is None:
-            i_masks = i_train
-
-        else:
-            i_masks = np.array([i for i in args.mask_scene if
-                        (i not in i_test and i not in i_val)])
-            
+         
         near = 0.1
         far = 5.0
         if args.colmap_depth:
@@ -860,6 +854,14 @@ def train():
         print('Unknown dataset type', args.dataset_type, 'exiting')
         return
 
+    if args.mask_scene is None:
+        i_masks = i_train
+
+    else:
+        i_masks = np.array([i for i in args.mask_scene if
+                            (i not in i_test and i not in i_val)])
+        
+    
     # Cast intrinsics to right types
     H, W, focal = hwf
     H, W = int(H), int(W)
@@ -910,11 +912,11 @@ def train():
         with torch.no_grad():
 
             if args.render_test:
-                testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test', start))
+                testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:07d}'.format('test', start))
             elif args.render_train:
-                testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('train', start))
+                testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:07d}'.format('train', start))
             else:
-                testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('path', start))
+                testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:07d}'.format('path', start))
 
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', render_poses.shape)
@@ -1075,7 +1077,7 @@ def train():
     
     plot_lossimg = Plot('Loss_img', 'Step', 'Loss', ['train loss', 'test loss'], env=args.expname)
     plot_psnr = Plot('PSNR', 'Step', 'PSNR', ['train psnr', 'test psnr'], env=args.expname)
-    plot_loss = Plot('Loss', 'Step', 'Loss', ['train loss', 'test loss'], env=args.expname)
+    plot_loss = Plot('Loss', 'Step', 'Loss', ['nerf loss'], env=args.expname)
     
     plot_disp = Plot_image('disp', args.expname)
 
@@ -1301,7 +1303,7 @@ def train():
 
         # Rest is logging
         if i%args.i_weights==0:
-            path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
+            path = os.path.join(basedir, expname, '{:07d}.tar'.format(i))
             torch.save({
                 'global_step': global_step,
                 'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict() if render_kwargs_train['network_fn'] is not None else None,
