@@ -329,7 +329,13 @@ def create_nerf(args):
 
     print('Found ckpts', ckpts)
     if len(ckpts) > 0 and not args.no_reload:
-        ckpt_path = ckpts[-1]
+
+        if expname=='Event_P21_4':
+            ckpt= max([int(ckpt[19:-4]) for ckpt in ckpts])
+            ckpt_path = os.path.join(basedir, expname, str(ckpt)+'.tar')
+        else:
+            ckpt_path = ckpts[-1]
+            
         print('Reloading from', ckpt_path)
         ckpt = torch.load(ckpt_path)
 
@@ -341,6 +347,12 @@ def create_nerf(args):
         if model_fine is not None:
             model_fine.load_state_dict(ckpt['network_fine_state_dict'])
 
+        if args.render_only:
+            model.eval()
+        else:
+            model.train()
+            
+            
     ##########################
 
     render_kwargs_train = {
@@ -649,9 +661,6 @@ def config_parser():
                         help='frequency of render_poses video saving')
     parser.add_argument("--i_visdom",   type=int, default=100, 
                         help='frequency of visdom display')
-    parser.add_argument("--visdom_name",   type=str, default='DSNeRF', 
-                        help='name of the visdom environment')    
-    
     
     # debug
     parser.add_argument("--debug",  action='store_true')
@@ -695,6 +704,7 @@ def config_parser():
     parser.add_argument("--seg_lambda", type=float, default=0.1, help="segmentation lambda used for loss")
     parser.add_argument("--mask_data", action='store_true', help="indicates if the images are in a mask format")
     parser.add_argument("--mask_scene", nargs='+', type=int, help="id of mask scenes used for train")
+    parser.add_argument("--i_masks_poses", nargs='+', type=int, help="ids of mask scenes associated with images ids")
     
     parser.add_argument("--N_lab", type=int, default=2, help="number of labels")
     
@@ -789,15 +799,6 @@ def train():
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
 
-        if args.segmentation:
-            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview)
-
-            hwf_masks = poses_masks[0,:3,-1]
-            H_m, W_m, focal_m = hwf_masks
-            H_m, W_m = int(H_m), int(W_m)
-            hwm_masks= [H_m, W_m, focal_m]
-
-        
         if not isinstance(i_test, list):
             i_test = [i_test]
 
@@ -812,12 +813,30 @@ def train():
             i_test = []
 
         i_val = i_test
+
+
         if args.train_scene is None:
             i_train = np.array([i for i in np.arange(int(images.shape[0])) if
-                        (i not in i_test and i not in i_val)])
+                                (i not in i_test and i not in i_val)])
         else:
             i_train = np.array([i for i in args.train_scene if
-                        (i not in i_test and i not in i_val)])
+                                (i not in i_test and i not in i_val)])
+        
+        if args.segmentation:
+            
+            if args.mask_scene is None:
+                i_masks = i_train
+                
+            else:
+                i_masks = np.array([i for i in args.mask_scene if
+                                    (i not in i_test and i not in i_val)])
+
+            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview, i_masks=i_masks, i_masks_poses=args.i_masks_poses)
+
+            hwf_masks = poses_masks[0,:3,-1]
+            H_m, W_m, focal_m = hwf_masks
+            H_m, W_m = int(H_m), int(W_m)
+            hwm_masks= [H_m, W_m, focal_m]
 
         print('DEFINING BOUNDS')
         if args.no_ndc:
@@ -854,13 +873,6 @@ def train():
         print('Unknown dataset type', args.dataset_type, 'exiting')
         return
 
-    if args.mask_scene is None:
-        i_masks = i_train
-
-    else:
-        i_masks = np.array([i for i in args.mask_scene if
-                            (i not in i_test and i not in i_val)])
-        
     
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -925,13 +937,13 @@ def train():
             if args.render_frames:
                 savedir = testsavedir
             
-            rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, savedir=savedir, render_factor=args.render_factor, segmentation=args.segmentation)
+            rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, savedir=savedir, render_factor=args.render_factor, segmentation=args.segmentation, N_lab=args.N_lab)
             print('Done rendering', testsavedir)
 
             imageio.mimwrite(os.path.join(testsavedir, 'rgb.mp4'), to8b(rgbs), fps=30, quality=8)
             disps[np.isnan(disps)] = 0
             print('Depth stats', np.mean(disps), np.max(disps), np.percentile(disps, 95))
-            imageio.mimwrite(os.path.join(testsavedir, 'disp.mp4'), to8b(disps / np.percentile(disps, 95)), fps=30, quality=8)
+            imageio.mimwrite(os.path.join(testsavedir, 'disp.mp4'), to8b(disps / np.nanmax(disps)), fps=30, quality=8)
 
             if args.segmentation:
                 imageio.mimwrite(os.path.join(testsavedir, 'mask.mp4'), to8b(masks), fps=30, quality=8)
@@ -953,6 +965,7 @@ def train():
         N_seg = int(args.N_rand * args.seg_rays_prop)
         N_depth = int(args.N_rand * args.depth_rays_prop)
         N_rgb = args.N_rand - N_seg - N_depth
+
     use_batching = not args.no_batching
     if use_batching:
         # For random ray batching
@@ -1015,7 +1028,7 @@ def train():
             if args.debug:
                 print('rays_seg.shape:', rays_seg.shape)
             rays_seg = np.transpose(rays_seg, [0,2,3,1,4]) # [N, H, W, ro+rd+lab] , 3]
-            rays_seg = np.stack([rays_seg[i] for i in i_masks], 0) # train masks only
+            #rays_seg = np.stack([rays_seg[i] for i in i_masks], 0) # train masks only
             rays_seg = np.reshape(rays_seg, [-1,3,3]) # ?? [(N-1)*H*W, ro+rd+lab, 3]
             rays_seg = rays_seg.astype(np.float32)
             print('shuffle rays')
@@ -1315,7 +1328,7 @@ def train():
         if args.i_video > 0 and i%args.i_video==0 and i > start or i ==1000:
             # Turn on testing mode
             with torch.no_grad():
-                rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation, N_lab=args.N_lab)
+                rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, render_factor=args.render_factor, segmentation=args.segmentation, N_lab=args.N_lab)
                 print('Done, saving')
             if args.linear:
                 moviebase = os.path.join(basedir, expname, '{}_linear_{:07d}_'.format(expname, i))

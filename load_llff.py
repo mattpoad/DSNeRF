@@ -60,14 +60,20 @@ def _minify(basedir, imgs_type='images', factors=[], resolutions=[]):
             check_output('rm {}/*.{}'.format(imgdir, ext), shell=True)
             print('Removed duplicates')
         print('Done')
-                
+
         
-def _load_data(basedir, directory='images', downsample=True, factor=None, width=None, height=None, load_imgs=True, masksasimage=False):
+        
+def _load_data(basedir, directory='images', downsample=True, factor=None, width=None, height=None, load_imgs=True, masksasimage=False, i_masks=None, i_masks_poses=None):
     
     poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
+
+    if directory == 'masks' and i_masks is not None: #
+        if i_masks_poses == None:
+            poses_arr = np.array([poses_arr[i] for i in i_masks])
+        else:
+            poses_arr = np.array([poses_arr[i] for i in i_masks_poses])
     poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0]) # 3 x 5 x N
-    bds = poses_arr[:, -2:].transpose([1,0])
-    
+    bds = poses_arr[:, -2:].transpose([1,0])    
     img0 = [os.path.join(basedir, directory, f) for f in sorted(os.listdir(os.path.join(basedir, directory))) \
             if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
     sh = imageio.imread(img0).shape
@@ -100,6 +106,10 @@ def _load_data(basedir, directory='images', downsample=True, factor=None, width=
         return
     
     imgfiles = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir)) if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
+
+    if i_masks is not None:
+        imgfiles = [imgfiles[i] for i in i_masks]
+        
     if poses.shape[-1] != len(imgfiles):
         print( 'Mismatch between imgs {} and poses {} !!!!'.format(len(imgfiles), poses.shape[-1]) )
         return
@@ -334,12 +344,12 @@ def spherify_poses(poses, bds):
 
 
 
-def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, linear=False, sideview=False, test=False):
+def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, linear=False, sideview=False, test=False, i_masks=None, i_masks_poses=None) :
     
     if imgs_type == 'images':
         poses, bds, imgs = _load_data(basedir, downsample=downsample, factor=factor) # factor=8 downsamples original imgs by 8x
     elif imgs_type == 'masks':
-        poses, bds, imgs = _load_data(basedir, directory='masks', downsample=downsample, factor=factor)
+        poses, bds, imgs = _load_data(basedir, directory='masks', downsample=downsample, factor=factor, i_masks=i_masks, i_masks_poses=i_masks_poses)
 
     elif imgs_type == 'masksasimages':
         poses, bds, imgs = _load_data(basedir, directory='images', factor=factor, masksasimage=True)
@@ -377,7 +387,7 @@ def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True,
             mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
             focal = mean_dz
 
-            N_views = 40
+            N_views = 100
             
             render_poses = render_path_linear(poses, N=N_views, focal=focal, sideview=sideview)
         
