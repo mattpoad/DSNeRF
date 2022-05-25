@@ -337,21 +337,31 @@ def create_nerf(args):
             ckpt_path = ckpts[-1]
             
         print('Reloading from', ckpt_path)
-        ckpt = torch.load(ckpt_path)
+        ckpt = torch.load(ckpt_path, map_location=device)
 
         start = ckpt['global_step']
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
         # Load model
-        model.load_state_dict(ckpt['network_fn_state_dict'])
-        if model_fine is not None:
-            model_fine.load_state_dict(ckpt['network_fine_state_dict'])
+        if not args.finetune:
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            model.load_state_dict(ckpt['network_fn_state_dict'])
 
-        if args.render_only:
-            model.eval()
         else:
+            model.load_state_dict(ckpt['network_fn_state_dict'], strict=False)
+
+        if model_fine is not None:
+            model_fine.load_state_dict(ckpt['network_fine_state_dict'], strict=True)
+            if not args.render_only:
+                model_fine.train()
+            else:
+                model_fine.eval()
+
+        model.to(device)
+        if not args.render_only:
             model.train()
-            
+        else:
+            model.eval()
+
             
     ##########################
 
@@ -566,6 +576,8 @@ def config_parser():
                         help='do not reload weights from saved ckpt')
     parser.add_argument("--ft_path", type=str, default=None, 
                         help='specific weights npy file to reload for coarse network')
+
+    parser.add_argument("--finetune", action='store_true', help="do not load the optimizer")
 
     # rendering options
     parser.add_argument("--N_samples", type=int, default=64, 
@@ -828,8 +840,11 @@ def train():
                 i_masks = i_train
                 
             else:
-                i_masks = np.array([i for i in args.mask_scene if
-                                    (i not in i_test and i not in i_val)])
+                if args.i_masks_poses is None: # there are as many masks as images in the folder masks
+                    i_masks = np.array([i for i in args.mask_scene if
+                                        (i not in i_test and i not in i_val)])
+                else:
+                    i_masks = np.array([i for i in args.mask_scene])
 
             masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview, i_masks=i_masks, i_masks_poses=args.i_masks_poses)
 
@@ -1095,6 +1110,7 @@ def train():
     plot_disp = Plot_image('disp', args.expname)
 
     if args.segmentation:
+        plot_lossseg = Plot('Segmentation loss', 'Step', 'Loss', ['train loss'], env=args.expname)
         plot_imgs = Plot_image('rgb_mask', args.expname)
     else:
         plot_rgb = Plot_image('rgb', args.expname)
@@ -1325,7 +1341,7 @@ def train():
             }, path)
             print('Saved checkpoints at', path)
 
-        if args.i_video > 0 and i%args.i_video==0 and i > start or i ==1000:
+        if args.i_video > 0 and i%args.i_video==0 and i > start or i ==10000:
             # Turn on testing mode
             with torch.no_grad():
                 rgbs, disps, masks = render_path(render_poses, hwf, args.chunk, render_kwargs_test, render_factor=args.render_factor, segmentation=args.segmentation, N_lab=args.N_lab)
@@ -1378,6 +1394,12 @@ def train():
             test_loss = img2mse(torch.Tensor(rgbs), images[i_test]).cpu()
             
             test_psnr = mse2psnr(test_loss).cpu()
+
+            if args.segmentation:
+                #test_seg =
+                plot_lossseg.update('train loss', i, seg_loss.item())
+
+            
 
             plot_lossimg.update('train loss', i, img_loss.item())
             plot_lossimg.update('test loss', i, test_loss.numpy())

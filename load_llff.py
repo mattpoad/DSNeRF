@@ -240,6 +240,10 @@ def render_path_test(poses, N):
     render_poses = []
     hwf, vec2, up, init_pos, final_pos = poses_linear(poses)
     T = poses_translation(poses)
+    print(f"T {T}")
+    T[1] *= 0       # view adjustment along the vertical dimension
+    #T[2] *= 0.1     # view adjustment along the horizontal dimension
+    T[0] *= 2.5
     
     for i,x in enumerate(np.linspace(0., 1., N+1)[:-1]):
         new_pos = x*(final_pos - init_pos)
@@ -349,6 +353,8 @@ def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True,
     if imgs_type == 'images':
         poses, bds, imgs = _load_data(basedir, downsample=downsample, factor=factor) # factor=8 downsamples original imgs by 8x
     elif imgs_type == 'masks':
+        print(f"i_masks {i_masks}")
+        print(f"i_masks_poses {i_masks_poses}")
         poses, bds, imgs = _load_data(basedir, directory='masks', downsample=downsample, factor=factor, i_masks=i_masks, i_masks_poses=i_masks_poses)
 
     elif imgs_type == 'masksasimages':
