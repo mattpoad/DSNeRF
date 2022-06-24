@@ -212,6 +212,8 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
     rgbs = []
     disps = []    
     masks = []
+    # if superpose:
+    #     masksrgbs = []
         
     if len(render_poses)>10:
         print(f"...loading {len(render_poses)} frames")
@@ -225,6 +227,14 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
             mask = mask.cpu().float().numpy().astype(np.uint8)
             mask = display_mask(mask)
             masks.append(mask)
+
+            # if superpose:
+            #     ### alpha*rgb + (1-alpha)*mask
+            #     rgb2 = Image.fromarray(rgb.cpu().numpy().astype(np.uint8))
+            #     msk = Image.fromarray(to8b(mask))
+            #     img = Image.blend(msk, rgb2, 1)
+            #     #img.paste(msk, (0,0), msk)
+            #     masksrgbs.append(np.array(img))
         else:
             rgb, disp, acc, depth, extras = render(H, W, focal, chunk=chunk, c2w=c2w[:3,:4], retraw=True, **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
@@ -244,11 +254,20 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
             # depth_color[np.isnan(depth_color)] = 0
             # imageio.imwrite(os.path.join(savedir, '{:03d}_depth.png'.format(i)), depth_color)
             imageio.imwrite(os.path.join(savedir, '{:03d}_depth.png'.format(i)), depth)
-            if segmentation:
+
+            if segmentation:                    
                 mask8 = to8b(masks[-1])
                 mask8[np.isnan(mask8)] = 0
                 imageio.imwrite(os.path.join(savedir, '{:03d}_mask.png'.format(i)), mask8)
                 np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), mask=mask, acc=acc.cpu().numpy(), depth=depth)
+                # if superpose:
+                #     maskrgb8 = to8b(masksrgbs[-1])
+                #     maskrgb8[np.isnan(maskrgb8)] = 0
+                #     imageio.imwrite(os.path.join(savedir, '{:03d}_superpose.png'.format(i)), maskrgb8)
+                #     np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), mask=mask, maskrgb=maskrgb, acc=acc.cpu().numpy(), depth=depth)
+                # else:
+                #     np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), mask=mask, acc=acc.cpu().numpy(), depth=depth)
+                    
             else:
                 np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), acc=acc.cpu().numpy(), depth=depth)
 
@@ -257,6 +276,8 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
     disps = np.stack(disps, 0)
     if segmentation:
         masks = np.stack(masks,0)
+        # if superpose:
+        #     masksrgbs = np.stack(masksrgbs,0)
     
     return rgbs, disps, masks
 
@@ -270,7 +291,12 @@ def create_nerf(args):
     embeddirs_fn = None
     if args.use_viewdirs:
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
-    output_ch = 7 if args.segmentation else 4
+        
+    if args.segmentation:
+        output_ch = 4 + args.N_lab
+    else:
+        output_ch = 4
+    
     skips = [4]
     if args.alpha_model_path is None:
         model = NeRF(D=args.netdepth, W=args.netwidth,
@@ -332,9 +358,13 @@ def create_nerf(args):
 
         if expname=='Event_P21_4':
             ckpt= max([int(ckpt[19:-4]) for ckpt in ckpts])
-            ckpt_path = os.path.join(basedir, expname, str(ckpt)+'.tar')
+            ckpt_path = os.path.join(basedir, expname, '{:07d}'.format(ckpt)+'.tar')
+        elif expname[:4]=='car2':
+            ckpt= max([int(ckpt[-10:-4]) for ckpt in ckpts])
+            ckpt_path = os.path.join(basedir, expname, '{:06d}'.format(ckpt)+'.tar')
         else:
-            ckpt_path = ckpts[-1]
+            ckpt= max([int(ckpt[-11:-4]) for ckpt in ckpts])
+            ckpt_path = os.path.join(basedir, expname, '{:07d}'.format(ckpt)+'.tar')
             
         print('Reloading from', ckpt_path)
         ckpt = torch.load(ckpt_path, map_location=device)
@@ -712,13 +742,18 @@ def config_parser():
     # Segmentation options
 
     parser.add_argument("--segmentation", action='store_true', help="segmentation is considered during training")
+    parser.add_argument("--superpose", action='store_true', help="render superposed masks and images")
+    parser.add_argument("--transparency", type=float, default=0.95, help="transparency of the mask in the superposed render")
     parser.add_argument("--seg_rays_prop", type=float, default=0.1, help="Proportion of segmentation rays")
     parser.add_argument("--seg_lambda", type=float, default=0.1, help="segmentation lambda used for loss")
     parser.add_argument("--mask_data", action='store_true', help="indicates if the images are in a mask format")
     parser.add_argument("--mask_scene", nargs='+', type=int, help="id of mask scenes used for train")
-    parser.add_argument("--i_masks_poses", nargs='+', type=int, help="ids of mask scenes associated with images ids")
+    parser.add_argument("--i_masks_poses", nargs='+', type=int, help="mask scenes ids associated with images ids, used if we have less masks than images")
     
     parser.add_argument("--N_lab", type=int, default=2, help="number of labels")
+
+    parser.add_argument("--test_pos", action='store_true', help="test the new poses implementation")
+    parser.add_argument("--test_traj", action='store_true', help="test the render trajectoire")
     
     return parser
 
@@ -789,8 +824,6 @@ def train():
     torch.cuda.set_device(args.gpu)
 
     if args.dataset_type == 'llff':
-        if args.colmap_depth:
-            depth_gts = load_colmap_depth(args.datadir, factor=args.factor, bd_factor=.75)
 
         if args.downsample:
             factor = args.factor
@@ -798,9 +831,13 @@ def train():
             factor = 1
 
         
+        if args.colmap_depth:
+            depth_gts = load_colmap_depth(args.datadir, factor=factor, bd_factor=.75)
+
+        
         images, poses, bds, render_poses, i_test = load_llff_data('images', args.datadir, args.downsample, factor,
                                                                   recenter=True, bd_factor=.75,
-                                                                  spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview)
+                                                                  spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview, test=args.test_pos, test_traj=args.test_traj)
         
         if args.mask_data:
             images, poses, bds, render_poses, i_test = load_llff_data('masksasimages', args.datadir, factor,
@@ -845,8 +882,9 @@ def train():
                                         (i not in i_test and i not in i_val)])
                 else:
                     i_masks = np.array([i for i in args.mask_scene])
+                    i_masks_poses = args.i_masks_poses
 
-            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview, i_masks=i_masks, i_masks_poses=args.i_masks_poses)
+            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview, i_masks=i_masks, i_masks_poses=args.i_masks_poses, test=args.test_pos, test_traj=args.test_traj)
 
             hwf_masks = poses_masks[0,:3,-1]
             H_m, W_m, focal_m = hwf_masks
@@ -962,7 +1000,12 @@ def train():
 
             if args.segmentation:
                 imageio.mimwrite(os.path.join(testsavedir, 'mask.mp4'), to8b(masks), fps=30, quality=8)
-
+                if args.superpose:
+                    masksrgbs = []
+                    a = args.transparency
+                    for i in range(len(rgbs)):
+                        masksrgbs.append(a*rgbs[i]+(1-a)*masks[i])
+                    imageio.mimwrite(os.path.join(testsavedir, 'superpose.mp4'), to8b(masksrgbs), fps=30, quality=8)
             
             return
 
@@ -1031,12 +1074,12 @@ def train():
             rays_seg_list = []
             rays = np.stack([get_rays_np(H_m, W_m, focal_m, p) for p in poses_masks[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
             if args.debug:
-                print('rays.shape:', rays.shape)
+                print(f"---- masks.shape {masks.shape}")
+                print(f"---- masks[:,None,:,:,None].shape {masks[:,None,:,:,None].shape}")
+                print(f"---- rays.shape {rays.shape}")
+
             print('done, concats')
 
-            print(f"---- masks.shape {masks.shape}")
-            print(f"---- masks[:,None,:,:,None].shape {masks[:,None,:,:,None].shape}")
-            print(f"---- rays.shape {rays.shape}")
             masks = np.concatenate([masks[:,None,:,:,None],masks[:,None,:,:,None],masks[:,None,:,:,None]],4)
 
             rays_seg = np.concatenate([rays, masks], 1) # [N, ro+rd+lab, H, W, 3]
@@ -1086,13 +1129,15 @@ def train():
         raysRGB_iter = iter(DataLoader(RayDataset(rays_rgb), batch_size = N_rgb, shuffle=False, num_workers=0))
         raysDepth_iter = iter(DataLoader(RayDataset(rays_depth), batch_size = N_depth, shuffle=False, num_workers=0)) if rays_depth is not None else None
         raysSeg_iter = iter(DataLoader(RayDataset(rays_seg), batch_size = N_seg, shuffle=False, num_workers=0)) if rays_seg is not None else None
-        
+
+    if args.i_masks_poses is None and args.segmentation: # there are as many masks as images in the folder masks
+        i_masks_poses = i_masks
 
     N_iters = args.N_iters + 1
     print('Begin')
     print('TRAIN views are', i_train)
     if args.segmentation:
-        print('TRAIN views for masks are', i_masks)
+        print('TRAIN views for masks are', i_masks_poses)
     print('TEST views are', i_test)
     print('VAL views are', i_val)
 
@@ -1259,7 +1304,6 @@ def train():
         img_loss = img2mse(rgb, target_s)
         depth_loss = 0
         if args.depth_loss:
-            # depth_loss = img2mse(depth_col, target_depth)
             if args.weighted_loss:
                 if not args.normalize_depth:
                     depth_loss = torch.mean(((depth_col - target_depth) ** 2) * ray_weights)
@@ -1358,6 +1402,13 @@ def train():
                 imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
                 imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.nanmax(disps)), fps=30, quality=8)
                 imageio.mimwrite(moviebase + 'mask.mp4', to8b(masks), fps=30, quality=8)
+                if args.superpose:
+                    masksrgbs = []
+                    a = args.transparency
+                    for i in range(len(rgbs)):
+                        masksrgbs.append(a*rgbs[i]+(1-a)*masks[i])
+                    imageio.mimwrite(os.path.join(testsavedir, 'superpose.mp4'), to8b(masksrgbs), fps=30, quality=8)
+                    
                 #plot_imgs.image(to8b(disps)[5,10], to8b(masks)[5,10], to8b(rgbs)[5,10])                    
             
             #time.sleep(0.05)
