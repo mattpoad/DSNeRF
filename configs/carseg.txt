@@ -1,9 +1,20 @@
 segmentation = True
-expname = car
+superpose = True
+transparency = 0.95
+
+expname = car2_labeltest
 basedir = ./logs
-datadir = ./data/car
+datadir = ./data/car2
 dataset_type = llff
-downsample =  True
+downsample = True
+downsample_msk = False
+
+gpu = 1
+
+render_only = False
+no_reload = False
+ft_path = ./logs/car2_labeltest/0400000.tar
+render_factor = 2
 
 factor = 2
 
@@ -11,6 +22,7 @@ depth_rays_prop = 0.33
 seg_rays_prop = 0.33
 seg_lambda = 0.1
 
+N_lab = 2
 N_rand = 1024
 N_samples = 64
 N_importance = 64
@@ -22,13 +34,13 @@ chunk = 8192
 netchunk = 16384
 netdepth = 4
 
-i_testset = 1000
-i_video = 10000
-N_iters = 20000
+i_visdom = 2000
+i_testset = 100000
+i_video = 15000
+N_iters = 400000
 
-train_scene = [0, 1]
-test_scene = [-1]
 no_ndc = True
 colmap_depth = True
 depth_loss = True
 depth_lambda = 0.1
+
