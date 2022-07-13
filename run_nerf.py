@@ -20,7 +20,6 @@ import matplotlib.pyplot as plt
 from run_nerf_helpers import *
 
 from load_llff import load_llff_data, load_colmap_depth
-#from load_llff import load_llff_mask_data
 from load_dtu import load_dtu_data
 
 from loss import SigmaLoss
@@ -227,20 +226,10 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
             mask = mask.cpu().float().numpy().astype(np.uint8)
             mask = display_mask(mask)
             masks.append(mask)
-
-            # if superpose:
-            #     ### alpha*rgb + (1-alpha)*mask
-            #     rgb2 = Image.fromarray(rgb.cpu().numpy().astype(np.uint8))
-            #     msk = Image.fromarray(to8b(mask))
-            #     img = Image.blend(msk, rgb2, 1)
-            #     #img.paste(msk, (0,0), msk)
-            #     masksrgbs.append(np.array(img))
         else:
             rgb, disp, acc, depth, extras = render(H, W, focal, chunk=chunk, c2w=c2w[:3,:4], retraw=True, **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
-        #if i==0:
-        #    print(rgb.shape, disp.shape)
 
         if savedir is not None:
             rgb8 = to8b(rgbs[-1])
@@ -259,15 +248,7 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
                 mask8 = to8b(masks[-1])
                 mask8[np.isnan(mask8)] = 0
                 imageio.imwrite(os.path.join(savedir, '{:03d}_mask.png'.format(i)), mask8)
-                np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), mask=mask, acc=acc.cpu().numpy(), depth=depth)
-                # if superpose:
-                #     maskrgb8 = to8b(masksrgbs[-1])
-                #     maskrgb8[np.isnan(maskrgb8)] = 0
-                #     imageio.imwrite(os.path.join(savedir, '{:03d}_superpose.png'.format(i)), maskrgb8)
-                #     np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), mask=mask, maskrgb=maskrgb, acc=acc.cpu().numpy(), depth=depth)
-                # else:
-                #     np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), mask=mask, acc=acc.cpu().numpy(), depth=depth)
-                    
+                np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), mask=mask, acc=acc.cpu().numpy(), depth=depth)                    
             else:
                 np.savez(os.path.join(savedir, '{:03d}.npz'.format(i)), rgb=rgb.cpu().numpy(), disp=disp.cpu().numpy(), acc=acc.cpu().numpy(), depth=depth)
 
@@ -276,9 +257,7 @@ def render_path(render_poses, hwf, chunk, render_kwargs, savedir=None, render_fa
     disps = np.stack(disps, 0)
     if segmentation:
         masks = np.stack(masks,0)
-        # if superpose:
-        #     masksrgbs = np.stack(masksrgbs,0)
-    
+        
     return rgbs, disps, masks
 
 
@@ -356,12 +335,19 @@ def create_nerf(args):
     print('Found ckpts', ckpts)
     if len(ckpts) > 0 and not args.no_reload:
 
+        # particular cases due to first trainings
         if expname=='Event_P21_4':
             ckpt= max([int(ckpt[19:-4]) for ckpt in ckpts])
             ckpt_path = os.path.join(basedir, expname, '{:07d}'.format(ckpt)+'.tar')
-        elif expname[:4]=='car2':
+        if expname=='Event_P21_2':
+            ckpt= max([int(ckpt[19:-4]) for ckpt in ckpts])
+            ckpt_path = os.path.join(basedir, expname, '{:06d}'.format(ckpt)+'.tar')
+        elif expname=='car2':
             ckpt= max([int(ckpt[-10:-4]) for ckpt in ckpts])
             ckpt_path = os.path.join(basedir, expname, '{:06d}'.format(ckpt)+'.tar')
+
+        elif args.ft_path is not None and args.ft_path!='None' :
+            ckpt_path = ckpts[-1]
         else:
             ckpt= max([int(ckpt[-11:-4]) for ckpt in ckpts])
             ckpt_path = os.path.join(basedir, expname, '{:07d}'.format(ckpt)+'.tar')
@@ -461,10 +447,12 @@ def render_rays(ray_batch,
       white_bkgd: bool. If True, assume a white background.
       raw_noise_std: ...
       verbose: bool. If True, print more debugging info.
+      segmentation: If True, consider segmentation masks
     Returns:
       rgb_map: [num_rays, 3]. Estimated RGB color of a ray. Comes from fine model.
       disp_map: [num_rays]. Disparity map. 1 / depth.
       acc_map: [num_rays]. Accumulated opacity along each ray. Comes from fine model.
+      seg_map: [num_rays, N_lab]. 
       raw: [num_rays, num_samples, 4]. Raw predictions from model.
       rgb0: See rgb_map. Output for coarse model.
       disp0: See disp_map. Output for coarse model.
@@ -577,6 +565,10 @@ def config_parser():
                         help='where to store ckpts and logs')
     parser.add_argument("--datadir", type=str, default='./data/llff/fern', 
                         help='input data directory')
+    parser.add_argument("--images_folder", type=str, default='images', 
+                        help='input images folder')
+    parser.add_argument("--masks_folder", type=str, default='masks', 
+                        help='input masks folder')
     parser.add_argument("--gpu", type=int, default=3, 
                         help='gpu used for training')
 
@@ -674,6 +666,8 @@ def config_parser():
     ## llff flags
     parser.add_argument("--factor", type=int, default=8, 
                         help='downsample factor for LLFF images')
+    parser.add_argument("--factor_msk", type=int, default=1, 
+                        help='downsample factor for masks')
     parser.add_argument("--no_ndc", action='store_true', 
                         help='do not use normalized device coordinates (set for non-forward facing scenes)')
     parser.add_argument("--lindisp", action='store_true', 
@@ -746,7 +740,6 @@ def config_parser():
     parser.add_argument("--transparency", type=float, default=0.95, help="transparency of the mask in the superposed render")
     parser.add_argument("--seg_rays_prop", type=float, default=0.1, help="Proportion of segmentation rays")
     parser.add_argument("--seg_lambda", type=float, default=0.1, help="segmentation lambda used for loss")
-    parser.add_argument("--mask_data", action='store_true', help="indicates if the images are in a mask format")
     parser.add_argument("--mask_scene", nargs='+', type=int, help="id of mask scenes used for train")
     parser.add_argument("--i_masks_poses", nargs='+', type=int, help="mask scenes ids associated with images ids, used if we have less masks than images")
     
@@ -754,15 +747,45 @@ def config_parser():
 
     parser.add_argument("--test_pos", action='store_true', help="test the new poses implementation")
     parser.add_argument("--test_traj", action='store_true', help="test the render trajectoire")
+
+    parser.add_argument("--visdom", action='store_true', help="show results on visdom")
+    parser.add_argument("--vis_server", type=str, default='localhost', help="name of visdom server")
+    parser.add_argument("--vis_port", type=int, default=8097, help="name of the visdom port")
     
     return parser
 
 
 
+# class Plot:
+    
+#     def __init__(self, title, xlabel='xlabel', ylabel='ylabel', legends=['legend'], env='DSNeRF'):
+#         self.vis = visdom.Visdom(server='10.10.77.108', port=8099, env=env)
+#         self.win = None
+#         self.opts = dict(
+#             title = title,
+#             xlabel = xlabel,
+#             ylabel = ylabel,
+#             height = 350,
+#             width = 500,
+#             ytickmin = 0,
+#             xtickmin = 0,
+#             xtickmax = 5,
+#             showlegend = True
+#         )
+#         self.legends = legends
+    
+#     def update(self, legend, x, y):
+#         assert legend in self.legends, 'legend %s is not in %s' % (legend, self.legends)
+#         if self.win == None:
+#             self.opts['ytickmax'] = y
+#             self.win = self.vis.line(X=[x], Y=[y], name=legend, opts=self.opts)
+#         else:
+#             self.vis.line(X=[x], Y=[y], win=self.win, name=legend, update='append', opts=self.opts)
+
 class Plot:
     
-    def __init__(self, title, xlabel='xlabel', ylabel='ylabel', legends=['legend'], env='DSNeRF'):
-        self.vis = visdom.Visdom(server='10.10.77.108', port=8099, env=env)
+    def __init__(self, args, title, xlabel='xlabel', ylabel='ylabel', legends=['legend']):
+        self.vis = visdom.Visdom(server=args.vis_server, port=args.vis_port, env=args.expname)
         self.win = None
         self.opts = dict(
             title = title,
@@ -785,10 +808,11 @@ class Plot:
         else:
             self.vis.line(X=[x], Y=[y], win=self.win, name=legend, update='append', opts=self.opts)
 
+            
 class Plot_image:
 
-    def __init__(self, title, env):
-        self.vis = visdom.Visdom(server='10.10.77.108', port=8099, env=env)
+    def __init__(self, args, title):
+        self.vis = visdom.Visdom(server=args.vis_server, port=args.vis_port, env=args.expname)
         self.win = None
         self.title = title
         
@@ -830,19 +854,15 @@ def train():
         else:
             factor = 1
 
+        factor_poses = factor
         
         if args.colmap_depth:
             depth_gts = load_colmap_depth(args.datadir, factor=factor, bd_factor=.75)
 
         
-        images, poses, bds, render_poses, i_test = load_llff_data('images', args.datadir, args.downsample, factor,
+        images, poses, bds, render_poses, i_test = load_llff_data('images', args.datadir, args.images_folder, args.downsample, factor, factor_poses,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview, test=args.test_pos, test_traj=args.test_traj)
-        
-        if args.mask_data:
-            images, poses, bds, render_poses, i_test = load_llff_data('masksasimages', args.datadir, factor,
-                                                                  recenter=True, bd_factor=.75,
-                                                                      spherify=args.spherify, linear=args.linear, sideview=args.sideview)
         
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
@@ -872,7 +892,7 @@ def train():
                                 (i not in i_test and i not in i_val)])
         
         if args.segmentation:
-            
+
             if args.mask_scene is None:
                 i_masks = i_train
                 
@@ -884,7 +904,12 @@ def train():
                     i_masks = np.array([i for i in args.mask_scene])
                     i_masks_poses = args.i_masks_poses
 
-            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.downsample_msk, factor, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview, i_masks=i_masks, i_masks_poses=args.i_masks_poses, test=args.test_pos, test_traj=args.test_traj)
+            if args.downsample_msk:
+                factor_msk = args.factor_msk
+            else:
+                factor_msk = 1
+                
+            masks, poses_masks, _, _, _ = load_llff_data('masks', args.datadir, args.masks_folder, args.downsample_msk, factor_msk, factor_poses, recenter=True, bd_factor=.75, spherify=args.spherify, path_zflat=True, linear=args.linear, sideview=args.sideview, i_masks=i_masks, i_masks_poses=args.i_masks_poses, test=args.test_pos, test_traj=args.test_traj)
 
             hwf_masks = poses_masks[0,:3,-1]
             H_m, W_m, focal_m = hwf_masks
@@ -1033,6 +1058,7 @@ def train():
             print('rays.shape:', rays.shape)
         print('done, concats')
 
+        print('rays.shape:', rays.shape)
         
         rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
         if args.debug:
@@ -1079,10 +1105,10 @@ def train():
                 print(f"---- rays.shape {rays.shape}")
 
             print('done, concats')
-
-            masks = np.concatenate([masks[:,None,:,:,None],masks[:,None,:,:,None],masks[:,None,:,:,None]],4)
-
-            rays_seg = np.concatenate([rays, masks], 1) # [N, ro+rd+lab, H, W, 3]
+            
+            masks = np.tile(masks[:,None,:,:,None], (1,3))   # masks = np.concatenate([masks[:,None,:,:,None],masks[:,None,:,:,None],masks[:,None,:,:,None]],4)
+            
+            rays_seg = np.concatenate([rays, masks], 1) # [N, ro+rd+label, H, W, 3]
             if args.debug:
                 print('rays_seg.shape:', rays_seg.shape)
             rays_seg = np.transpose(rays_seg, [0,2,3,1,4]) # [N, H, W, ro+rd+lab] , 3]
@@ -1148,17 +1174,18 @@ def train():
 
     criterion = nn.CrossEntropyLoss()
     
-    plot_lossimg = Plot('Loss_img', 'Step', 'Loss', ['train loss', 'test loss'], env=args.expname)
-    plot_psnr = Plot('PSNR', 'Step', 'PSNR', ['train psnr', 'test psnr'], env=args.expname)
-    plot_loss = Plot('Loss', 'Step', 'Loss', ['nerf loss'], env=args.expname)
+    if args.visdom:
+        plot_lossimg = Plot(args, 'Loss_img', 'Step', 'Loss', ['train loss', 'test loss'])
+        plot_psnr = Plot(args, 'PSNR', 'Step', 'PSNR', ['train psnr', 'test psnr'])
+        plot_loss = Plot(args, 'Loss', 'Step', 'Loss', ['nerf loss'])
     
-    plot_disp = Plot_image('disp', args.expname)
+        plot_disp = Plot_image(args, 'disp')
 
-    if args.segmentation:
-        plot_lossseg = Plot('Segmentation loss', 'Step', 'Loss', ['train loss'], env=args.expname)
-        plot_imgs = Plot_image('rgb_mask', args.expname)
-    else:
-        plot_rgb = Plot_image('rgb', args.expname)
+        if args.segmentation:
+            plot_lossseg = Plot(args, 'Segmentation loss', 'Step', 'Loss', ['train loss'])
+            plot_imgs = Plot_image(args, 'rgb_mask')
+        else:
+            plot_rgb = Plot_image(args, 'rgb')
         
     for i in trange(start, N_iters):
         time0 = time.time()
@@ -1316,11 +1343,12 @@ def train():
 
         seg_loss=0
         if args.segmentation:
-#            print(f"mask {mask}")
-#            print(f"mask shape {mask.shape}")
-#            print(f"target_seg {target_seg}")
-#            print(f"target_seg shape {target_seg.shape}")
-#            print(f"{batch_seg.shape}")
+            if args.debug:
+                print(f"mask {mask}")
+                print(f"mask shape {mask.shape}")
+                print(f"target_seg {target_seg}")
+                print(f"target_seg shape {target_seg.shape}")
+                print(f"batch_seg.shape {batch_seg.shape}")
             seg_loss = criterion(mask, target_seg)
             ##seg_loss = img2mse(mask, target_seg)
         sigma_loss = 0
@@ -1394,6 +1422,7 @@ def train():
                 moviebase = os.path.join(basedir, expname, '{}_linear_{:07d}_'.format(expname, i))
             else:
                 moviebase = os.path.join(basedir, expname, '{}_spiral_{:07d}_'.format(expname, i))
+
             if not args.segmentation:
                 imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
                 imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.nanmax(disps)), fps=30, quality=8)
@@ -1407,7 +1436,7 @@ def train():
                     a = args.transparency
                     for i in range(len(rgbs)):
                         masksrgbs.append(a*rgbs[i]+(1-a)*masks[i])
-                    imageio.mimwrite(os.path.join(testsavedir, 'superpose.mp4'), to8b(masksrgbs), fps=30, quality=8)
+                    imageio.mimwrite(moviebase + 'superpose.mp4', to8b(masksrgbs), fps=30, quality=8)
                     
                 #plot_imgs.image(to8b(disps)[5,10], to8b(masks)[5,10], to8b(rgbs)[5,10])                    
             
@@ -1439,7 +1468,7 @@ def train():
 
         
 
-        if i%args.i_visdom==0 and i > 0 and len(i_test) > 0 or i==100:
+        if args.visdom and i%args.i_visdom==0 and i > 0 and len(i_test) > 0 or i==100:
             with torch.no_grad():
                 rgbs, disps, masks = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, segmentation=args.segmentation, N_lab=args.N_lab)
             test_loss = img2mse(torch.Tensor(rgbs), images[i_test]).cpu()
