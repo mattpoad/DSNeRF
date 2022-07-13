@@ -9,14 +9,14 @@ import json
 ########## Slightly modified version of LLFF data loading code 
 ##########  see https://github.com/Fyusion/LLFF for original
 
-def _minify(basedir, imgs_type='images', factors=[], resolutions=[]):
+def _minify(basedir, imgs_folder='images', factors=[], resolutions=[]):
     needtoload = False
     for r in factors:
-        imgdir = os.path.join(basedir, imgs_type+'_{}'.format(r))
+        imgdir = os.path.join(basedir, imgs_folder+'_{}'.format(r))
         if not os.path.exists(imgdir):
             needtoload = True
     for r in resolutions:
-        imgdir = os.path.join(basedir, imgs_type+'_{}x{}'.format(r[1], r[0]))
+        imgdir = os.path.join(basedir, imgs_folder+'_{}x{}'.format(r[1], r[0]))
         if not os.path.exists(imgdir):
             needtoload = True
     if not needtoload:
@@ -25,7 +25,7 @@ def _minify(basedir, imgs_type='images', factors=[], resolutions=[]):
     from shutil import copy
     from subprocess import check_output
     
-    imgdir = os.path.join(basedir, imgs_type)
+    imgdir = os.path.join(basedir, imgs_folder)
     imgs = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir))]
     imgs = [f for f in imgs if any([f.endswith(ex) for ex in ['JPG', 'jpg', 'png', 'jpeg', 'PNG']])]
     imgdir_orig = imgdir
@@ -35,10 +35,10 @@ def _minify(basedir, imgs_type='images', factors=[], resolutions=[]):
 
     for r in factors + resolutions:
         if isinstance(r, int):
-            name = imgs_type+'_{}'.format(r)
+            name = imgs_folder+'_{}'.format(r)
             resizearg = '{}%'.format(100./r)
         else:
-            name = imgs_type+'_{}x{}'.format(r[1], r[0])
+            name = imgs_folder+'_{}x{}'.format(r[1], r[0])
             resizearg = '{}x{}'.format(r[1], r[0])
         imgdir = os.path.join(basedir, name)
         if os.path.exists(imgdir):
@@ -63,9 +63,9 @@ def _minify(basedir, imgs_type='images', factors=[], resolutions=[]):
 
         
         
-def _load_data(basedir, directory='images', downsample=True, factor=None, width=None, height=None, load_imgs=True, masksasimage=False, i_masks=None, i_masks_poses=None, recenter=True, test=False):
+def _load_data(basedir, imgs_folder='images', masks=False, downsample=True, factor=None, factor_poses=1, width=None, height=None, load_imgs=True, i_masks=None, i_masks_poses=None, recenter=True, test=False):
 
-    img0 = [os.path.join(basedir, directory, f) for f in sorted(os.listdir(os.path.join(basedir, directory))) \
+    img0 = [os.path.join(basedir, imgs_folder, f) for f in sorted(os.listdir(os.path.join(basedir, imgs_folder))) \
             if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
     sh = imageio.imread(img0).shape
     
@@ -74,23 +74,23 @@ def _load_data(basedir, directory='images', downsample=True, factor=None, width=
     if downsample:
         if factor is not None and factor>1:
             sfx = '_{}'.format(factor)
-            _minify(basedir, imgs_type=directory, factors=[factor])
+            _minify(basedir, imgs_folder=imgs_folder, factors=[factor])
             factor = factor
         elif height is not None:
             factor = sh[0] / float(height)
             width = int(sh[1] / factor)
-            _minify(basedir, imgs_type=directory, resolutions=[[height, width]])
+            _minify(basedir, imgs_folder=imgs_folder, resolutions=[[height, width]])
             sfx = '_{}x{}'.format(width, height)
         elif width is not None:
             factor = sh[1] / float(width)
             height = int(sh[0] / factor)
-            _minify(basedir, imgs_type=directory, resolutions=[[height, width]])
+            _minify(basedir, imgs_folder=imgs_folder, resolutions=[[height, width]])
             sfx = '_{}x{}'.format(width, height)
         else:
             factor = 1
     
     
-    imgdir = os.path.join(basedir, directory + sfx)
+    imgdir = os.path.join(basedir, imgs_folder + sfx)
         
     if not os.path.exists(imgdir):
         print( imgdir, 'does not exist, returning' )
@@ -110,24 +110,21 @@ def _load_data(basedir, directory='images', downsample=True, factor=None, width=
     
     sh = imageio.imread(imgfiles[0]).shape
     poses[:2, 4, :] = np.array(sh[:2]).reshape([2, 1])
-    poses[2, 4, :] = poses[2, 4, :] * 1./factor
+    poses[2, 4, :] = poses[2, 4, :] * 1./factor_poses
 
 
     # Correct rotation matrix ordering and move variable dim to axis 0
     poses = np.concatenate([poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1) # [-u, r, -t] -> [r, u, -t]
     poses = np.moveaxis(poses, -1, 0).astype(np.float32) # N x 3 x 5
-
-    # if recenter:
-    #     poses = recenter_poses(poses)
     
-    if test:
+    if test: # poses creation test for linear rendering
         poses[0, :3, 3] = np.array([poses.shape[0]*0.001/2, 1.*poses.shape[0]*0.04/2, 1.*poses.shape[0]*0.16/2])
         poses[0, :3, :3] = np.diag(np.array([1,1,1]))
         for i in range(1,poses.shape[0]):
             poses[i, :3, :3] = np.diag(np.array([1,1,1]))
             poses[i, :3, 3] = poses[i-1, :3, 3] + np.array([-0.001, -0.04, -0.16])
     
-    if directory == 'masks' and i_masks is not None: #
+    if masks and i_masks is not None: #
         if i_masks_poses == None:
             poses = np.array([poses[i, :, :] for i in i_masks])
         else:
@@ -148,7 +145,7 @@ def _load_data(basedir, directory='images', downsample=True, factor=None, width=
         else:
             return imageio.imread(f)
 
-    if directory=='masks':
+    if masks:
         imgs = imgs = [imread(f) for f in imgfiles]
     else:
         imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
@@ -187,11 +184,12 @@ def poses_avg(poses):
     return c2w
 
 
-def poses_linear(poses):
+def poses_linear(poses, debug=False):
     hwf = poses[0, :3, -1:]
-    
-    print(f"final: poses[:, :3, 3]max {poses[:, :3, 3][:, 2].argmax()}")
-    print(f"init: poses[:, :3, 3]min {poses[:, :3, 3][:, 2].argmin()}")
+
+    if debug:
+        print(f"final: poses[:, :3, 3]max {poses[:, :3, 3][:, 2].argmax()}")
+        print(f"init: poses[:, :3, 3]min {poses[:, :3, 3][:, 2].argmin()}")
 
     init_idx = poses[:, :3, 3][:, 2].argmin()
     final_idx = poses[:, :3, 3][:, 2].argmax()
@@ -204,7 +202,7 @@ def poses_linear(poses):
     return hwf, vec2, up, init_pos, final_pos
 
 def poses_translation(poses):
-
+    ''' test function : average succesive position difference '''
     pos = poses[:, :3, 3]
     T = np.zeros((len(poses)-1, 3))
 
@@ -222,96 +220,93 @@ def render_path_spiral(c2w, up, rads, focal, zdelta, zrate, rots, N):
     for theta in np.linspace(0., 2. * np.pi * rots, N+1)[:-1]:
         c = np.dot(c2w[:3,:4], np.array([np.cos(theta), -np.sin(theta), -np.sin(theta*zrate), 1.]) * rads)  # camera position eye
         # np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.])) center
-        z = normalize(c - np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.])))  # direction
+        z = normalize(c - np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.])))  # direcion
         render_poses.append(np.concatenate([viewmatrix(z, up, c), hwf], 1)) 
     return render_poses
 
 
-def render_path_linear(poses, N, focal=0, sideview=False, freq_sv=30, N_sv=20):
+def render_path_linear(poses, N, focal=0, sideview=False):
     render_poses = []
     
     hwf, vec2, up, init_pos, final_pos = poses_linear(poses)
 
-    if sideview:
-        T = poses_translation(poses)
-        print(f"---------T {T}")
-        print(f"---------T shape {T.shape}")
-        print(f"up shape {up.shape}")
-        tt = poses[:,:3,3]
-        rads = np.percentile(np.abs(tt), 90, 0)
+    # if sideview:
+    #     T = poses_translation(poses)
+    #     print(f"---------T {T}")
+    #     print(f"---------T shape {T.shape}")
+    #     print(f"up shape {up.shape}")
+    #     tt = poses[:,:3,3]
+    #     rads = np.percentile(np.abs(tt), 90, 0)
     
     for i,x in enumerate(np.linspace(0., 1., N)):
         new_pos = x*(final_pos - init_pos) + init_pos
         new_c2w = np.concatenate([viewmatrix(vec2, up, new_pos), hwf], 1)
         render_poses.append(new_c2w)
         
-    if sideview: # and i%freq_sv==0:
-        #render_poses += render_path_sideview(new_c2w, up, rads, focal, T, N_sv)
-        render_poses_test = render_path_test(poses, N)[::-1]
-        r0 = render_poses_test[-1]
-        deltac2w = render_poses[0] - r0
-        for i in np.linspace(0, 1, 10)[1:-1]:
-            newc2w = i*deltac2w + render_poses[0]
+    if sideview:
+        render_poses_r = render_path_sideview(poses, N,'right', focal)[::-1]
+        render_poses_l = render_path_sideview(poses, N, 'left', focal)
+        r0 = render_poses_r[0]
+        deltac2w = r0 - render_poses_l[-1]
+        pose0 = render_poses_l[-1]
+        for i in np.linspace(0., 1., 75)[1:-1]:
+            newc2w = i*deltac2w + pose0
+            render_poses_l.append(newc2w)
+        
+        # T = np.array([0,0,1])
+        # new_c2w = np.concatenate([viewmatrix(T, up, final_pos), hwf], 1)
+        # deltac2w = new_c2w - render_poses[-1]
+        # for i in np.linspace(0, 1, 100)[1:-1]:
+        #     newc2w = i*deltac2w + render_poses[-1]
+        #     render_poses.append(newc2w)
             
-    return render_poses
+        render_poses_l += render_poses_r
+
+        deltac2w = render_poses[0] - render_poses_r[-1]
+        pose0 = render_poses_r[-1]
+        for i in np.linspace(0., 1., 75)[1:-1]:
+            newc2w = i*deltac2w + pose0
+            render_poses_l.append(newc2w)
+
+        render_poses_l += render_poses
+            
+    return render_poses_l
 
 
-def render_path_test(poses, N, focal=0):
+def render_path_sideview(poses, N, direction='right', focal=0):
 
-    print(f"poses[:, :3, 0] {poses[:, :3, 0]}")
+    # print(f"poses[:, :3, 0] {poses[:, :3, 0]}")
 
     render_poses = []
     hwf, vec2, up, init_pos, final_pos = poses_linear(poses)
-    T = poses_translation(poses)
-    print(f"T {T}")
-    T_ = np.copy(T)
-    T_[0] = 0
-    T_[1] = 0     # view adjustment along the vertical dimension
-    T_[2] = 1     # view adjustment along the horizontal dimension
-    #T_[0] *= 0
-    print(f"T_ {T_}")
 
-    print(f"norm vec2 {normalize(vec2)}")
-    print(f"up {up}")
+    # recenter view direction test
+    # T = poses_translation(poses)
+    # print(f"T {T}")
+    # print(f"vec2 {vec2}")
+    
+    
+    # T_ = np.copy(T)
+    # T_[0] = 0
+    # T_[1] = 0     # view adjustment along the vertical dimension
+    # T_[2] = 1     # view adjustment along the horizontal dimension
+    # #T_[0] *= 0
 
-    pos = init_pos + T_
     #for x in np.linspace(0., 1., N+1)[:-1]:
-    for theta in np.linspace(0., 2. * np.pi, N):
-        x = theta/(2. * np.pi)
+    for x in np.linspace(0., 1., N):
         new_pos = x*(final_pos - init_pos) + init_pos
-        print(f"newpos {new_pos - pos}")
-        pos = new_pos
         new_c2w = np.concatenate([viewmatrix(vec2, up, new_pos), hwf], 1)
-        c = np.dot(new_c2w[:3,:4], np.array([np.cos(2*np.pi), -np.sin(2*np.pi), 0, 1]))  # 2pi : droite   pi : gauche
+        if direction=='right':
+            # c = np.dot(new_c2w[:3,:4], np.array([np.cos(2*np.pi), -np.sin(2*np.pi), 0, 1])*np.array([0.5, 0.5, 0, 1]))  # 2pi : droite   pi : gauche
+            c = np.dot(new_c2w[:3,:4], np.array([1, 0, 0, 1])*np.array([0.5, 0.5, 0, 1]))  # 2pi : droite   pi : gauche
+        if direction=='left':
+            # c = np.dot(new_c2w[:3,:4], np.array([np.cos(np.pi), -np.sin(np.pi), 0, 1])*np.array([0.5, 0.5, 0, 1]))  # 2pi : droite   pi : gauche
+            c = np.dot(new_c2w[:3,:4], np.array([-1, 0, 0, 1])*np.array([0.5, 0.5, 0, 1]))  # 2pi : droite   pi : gauche
         z = normalize(c - np.dot(new_c2w[:3,:4], np.array([0,0,-focal, 1.])))
-        #render_poses.append(new_c2w)
-        #print(f"c {c}")
-        #print(f"z {z}")
-        #c = np.dot(new_c2w[:3,:4], np.array([np.cos(1*np.pi), -np.sin(1*np.pi), 0, 1]))  # 2pi : droite   pi : gauche
-        #z = normalize(c - np.dot(new_c2w[:3,:4], np.array([0,0,-focal, 1.])))
-        #z[2] *= 0.7
         render_poses.append(np.concatenate([viewmatrix(z, up, c), hwf], 1)) 
         
     return render_poses
 
-
-
-def render_path_sideview(c2w, up, rads, focal, T, N):
-
-    render_poses = []
-    rads = np.array(list(rads) + [1.])
-    hwf = c2w[:,4:5]
-    pos = c2w[:3, 3]
-    c2w = viewmatrix(T, up, pos)
-    up = c2w[:3, 1]
-
-    for theta in np.linspace(0., 2. * np.pi, N+1)[:-1]:
-        c = np.dot(c2w[:3,:4], np.array([np.cos(theta), -np.sin(theta), -np.sin(theta), 1.]) * rads)  # camera position eye
-        # np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.]) center
-        z = normalize(c - np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.])))  # direction
-        render_poses.append(np.concatenate([viewmatrix(z, up, c), hwf], 1)) 
-    
-    return render_poses
 
 
 def recenter_poses(poses):
@@ -340,6 +335,8 @@ def spherify_poses(poses, bds):
     def min_line_dist(rays_o, rays_d):
         A_i = np.eye(3) - rays_d * np.transpose(rays_d, [0,2,1])
         b_i = -A_i @ rays_o
+        print(f"A_i {A_i}")
+        print(f"b_i {b_i}")
         pt_mindist = np.squeeze(-np.linalg.inv((np.transpose(A_i, [0,2,1]) @ A_i).mean(0)) @ (b_i).mean(0))
         return pt_mindist
 
@@ -390,26 +387,21 @@ def spherify_poses(poses, bds):
 
 
 
-def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, linear=False, sideview=False, i_masks=None, i_masks_poses=None, test=False, test_traj=False) :
+def load_llff_data(imgs_type, basedir, imgs_folder='images', downsample=True, factor=8, factor_poses=1, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, linear=False, sideview=False, i_masks=None, i_masks_poses=None, test=False, test_traj=False) :
     
     if imgs_type == 'images':
-        poses, bds, imgs = _load_data(basedir, downsample=downsample, factor=factor, test=test) # factor=8 downsamples original imgs by 8x
+        poses, bds, imgs = _load_data(basedir, imgs_folder=imgs_folder, downsample=downsample, factor=factor, factor_poses=factor_poses, test=test) # factor=8 downsamples original imgs by 8x
     elif imgs_type == 'masks':
-        print(f"i_masks {i_masks}")
-        print(f"i_masks_poses {i_masks_poses}")
-        poses, bds, imgs = _load_data(basedir, directory='masks', downsample=downsample, factor=factor, i_masks=i_masks, i_masks_poses=i_masks_poses, test=test)
-
-    elif imgs_type == 'masksasimages':
-        poses, bds, imgs = _load_data(basedir, directory='images', factor=factor, masksasimage=True)
-        
+        poses, bds, imgs = _load_data(basedir, imgs_folder=imgs_folder, masks=True, downsample=downsample, factor=factor, factor_poses=factor_poses, i_masks=i_masks, i_masks_poses=i_masks_poses, test=test)
+    
     print('Loaded', basedir, bds.min(), bds.max())
     
     # print('poses_bound.npy:\n', poses[:,:,0])
 
-    # Correct rotation matrix ordering and move variable dim to axis 0
+    # Correct rotation matrix ordering and move variable dim to axis 0 >>> moved to _load_data
     # poses = np.concatenate([poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1) # [-u, r, -t] -> [r, u, -t]
     # poses = np.moveaxis(poses, -1, 0).astype(np.float32)
-    print(poses.shape)
+
     imgs = np.moveaxis(imgs, -1, 0).astype(np.float32)
     images = imgs
     bds = np.moveaxis(bds, -1, 0).astype(np.float32)
@@ -433,14 +425,13 @@ def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True,
             focal = mean_dz
 
             N_view = 100
-            render_poses = render_path_test(poses, N_view, focal=focal)
+            render_poses = render_path_sideview(poses, N_view, focal=focal)
 
         else:
             close_depth, inf_depth = bds.min()*.9, bds.max()*5.
             dt = .75
             mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
             focal = mean_dz
-            print(f"-------focal {focal}")
 
             N_views = 100
             
@@ -456,7 +447,6 @@ def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True,
         
         c2w = poses_avg(poses)
         print('recentered', c2w.shape)
-        print(c2w[:3,:4])
 
         ## Get spiral
         # Get average pose
@@ -467,7 +457,7 @@ def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True,
         dt = .75
         mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
         focal = mean_dz
-        print(f"-------focal {focal}")
+
         # Get radii for spiral path
         shrink_factor = .8
         zdelta = close_depth * .2
@@ -476,6 +466,7 @@ def load_llff_data(imgs_type, basedir, downsample=True, factor=8, recenter=True,
         c2w_path = c2w
         N_views = 120
         N_rots = 2
+
         if path_zflat:
 #             zloc = np.percentile(tt, 10, 0)[2]
             zloc = -close_depth * .1
