@@ -105,11 +105,11 @@ class NeRF(nn.Module):
             self.alpha_linear = nn.Linear(W, 1)
             self.rgb_linear = nn.Linear(W//2, 3)
             if segmentation:
-                self.seg_linear = nn.Linear(W, N_lab)
+#                self.seg_linear = nn.Linear(W, N_lab)
                 self.seg_linears = nn.Sequential(fc_block(W, W // 2), nn.Linear(W // 2, N_lab))
         else:
             self.output_linear = nn.Linear(W, output_ch)
-
+            
     def forward(self, x):
         input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
         h = input_pts
@@ -356,10 +356,10 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
 
     return samples
 
-def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False, segmentation=False, N_lab=3):
+def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False, segmentation=False, N_lab=2):
     """Transforms model's predictions to semantically meaningful values.
     Args:
-        raw: [num_rays, num_samples along ray, 4]. Prediction from model.
+        raw: [num_rays, num_samples along ray, nb outputs]. Prediction from model.
         z_vals: [num_rays, num_samples along ray]. Integration time.
         rays_d: [num_rays, 3]. Direction of each ray.
     Returns:
@@ -368,7 +368,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         acc_map: [num_rays]. Sum of weights along each ray.
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
-        seg_map: [num_rays, 3]. Estimated mask.
+        seg_map: [num_rays, N_lab]. Estimated labels.
     """
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
