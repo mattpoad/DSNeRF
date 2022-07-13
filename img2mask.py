@@ -1,10 +1,9 @@
 import torch
 import numpy as np
 from tqdm import tqdm
-
 import torchvision.transforms.functional as F
 
-import os
+import os, imageio
 
 from torchvision import transforms
 from torchvision.utils import make_grid
@@ -23,7 +22,7 @@ from torchvision.transforms.functional import convert_image_dtype
 from PIL import Image
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.cuda.set_device(3)
+torch.cuda.set_device(1)
 
 
 
@@ -95,15 +94,19 @@ def config_parser():
     import configargparse
     parser = configargparse.ArgumentParser()
 
-    parser.add_argument("--datadir", type=str, help='image directory')
+    parser.add_argument("--datadir", type=str, help='path to data directory')
+    parser.add_argument("--images_folder", type=str, default='images', help='images directory')
+    parser.add_argument("--masks_folder", type=str, default='masks', help='masks directory')
     parser.add_argument("--item", type=str, help='type of labelised object')
 
     
     parser.add_argument("--transform", action='store_true', help='resize the mask')
-    parser.add_argument("--width", type=int, help='width of the resized mask')
-    parser.add_argument("--height", type=int, help='height of the resized mask')
+    parser.add_argument("--width", type=int, default=504, help='width of the resized mask')
+    parser.add_argument("--height", type=int, default=384, help='height of the resized mask')
 
     parser.add_argument("--network", type=str, default=deeplabv3_resnet50, help='the segmentation network used')
+
+    parser.add_argument("--show_masks", action='store_true', help='save jpg format masks')
     
     return parser
 
@@ -114,22 +117,33 @@ def save_imgs(args, imgs, filename):
     if not isinstance(imgs, list):
         imgs = [imgs]
     
-    path = args.datadir + '/masks/'
+    path = os.path.join(args.datadir, args.masks_folder)
     mkdir(path)
     
     for i, img in enumerate(imgs):
         img = img.detach()
         img = F.to_pil_image(img)
-        img.save(path + 'mask' + filename[i][5:])
+        img.save(path + 'mask_' + filename[i][:-4] + '.png')
 
+        if args.show_masks:
+            #img = imgs[i].float()
+            #img = img.detach()
+            #img = F.to_pil_image(img)
+            img = display_mask(imgs[i])
+            img = Image.fromarray(img.astype(np.uint8), 'RGB')
+            mkdir(args.datadir + '/masks_jpg')
+            img.save(args.datadir + '/masks_jpg/mask_' + filename[i][:-4] + '.jpg')
 
 def segmentation_mask(args):
 
     print(f"...Generate {args.item} masks\n\n")
     
-    path = args.datadir+'/images/'
-    filenames = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
-    img_list = [Image.open(path+f).convert('RGB') for f in filenames]
+    path = os.path.join(args.datadir, args.images_folder)
+    path = os.path.normpath(path)
+    print(path)
+    filenames = [f for f in sorted(os.listdir(path)) if os.path.isfile(os.path.join(path, f))]
+    print(filenames)
+    img_list = [Image.open(os.path.normpath(path+f)).convert('RGB') for f in filenames]
     img_list = [transforms.Compose([transforms.PILToTensor()])(img) for img in img_list]
     
     if args.transform:
@@ -144,14 +158,14 @@ def segmentation_mask(args):
 
     batch = torch.Tensor(batch).to(device)
 
-    N_batch = len(batch)//3
+    N_batch = len(batch)//3 # we split the data to avoid memory allocation error
     r_batch = len(batch)%3
-    
+
     model = args.network(pretrained=True, progress=False).to(device)
     model = model.eval()
     normalized_batch = F.normalize(batch, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
 
-    sem_classes = [
+    sem_classes = [ # classes for deeplabv3_resnet50
         '__background__', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus',
         'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike',
         'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor'
@@ -159,20 +173,22 @@ def segmentation_mask(args):
     sem_class_to_idx = {cls: idx for (idx, cls) in enumerate(sem_classes)}
 
     prev_i = 0
-    for i in range(N_batch, len(batch), N_batch): #the batch is splited in order to prevent a gpu mermory error
 
-        output = model(normalized_batch[prev_i:i])['out']
-        
-        normalized_masks = torch.nn.functional.softmax(output, dim=1)
-        
-        class_dim = 1
-        
-        boolean_masks = (normalized_masks.argmax(class_dim) == sem_class_to_idx[args.item])
-        boolean_masks = [m.cpu().float() for m in boolean_masks]
-
-        save_imgs(args, boolean_masks, filenames[prev_i:i])
-        prev_i = i
-
+    if N_batch != 0:
+        for i in range(N_batch, len(batch), N_batch): #the batch is splited in order to prevent a gpu mermory error
+            
+            output = model(normalized_batch[prev_i:i])['out']
+            
+            normalized_masks = torch.nn.functional.softmax(output, dim=1)
+            
+            class_dim = 1
+            
+            boolean_masks = (normalized_masks.argmax(class_dim) == sem_class_to_idx[args.item])
+            boolean_masks = [m.cpu().int() for m in boolean_masks]
+            
+            save_imgs(args, boolean_masks, filenames[prev_i:i])
+            prev_i = i
+            
     if r_batch != 0:
         output = model(normalized_batch[-r_batch:])['out']
 
@@ -181,8 +197,8 @@ def segmentation_mask(args):
         class_dim = 1
         
         boolean_masks = (normalized_masks.argmax(class_dim) == sem_class_to_idx[args.item])
-        boolean_masks = [m.cpu().float() for m in boolean_masks]
-
+        boolean_masks = [m.cpu().int() for m in boolean_masks]
+        
         save_imgs(args, boolean_masks, filenames[-r_batch:])
 
     print(f"Done, masks generated with {str(args.network).split()[1]}")
