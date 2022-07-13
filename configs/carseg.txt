@@ -13,7 +13,6 @@ gpu = 1
 
 render_only = False
 no_reload = False
-ft_path = ./logs/car2_labeltest/0400000.tar
 render_factor = 2
 
 factor = 2
@@ -34,10 +33,14 @@ chunk = 8192
 netchunk = 16384
 netdepth = 4
 
+visdom = True
+vis_server = 10.10.77.108
+vis_port = 8099
+
 i_visdom = 2000
 i_testset = 100000
 i_video = 15000
-N_iters = 400000
+N_iters = 450000
 
 no_ndc = True
 colmap_depth = True
